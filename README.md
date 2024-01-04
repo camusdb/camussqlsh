@@ -1,0 +1,2 @@
+# camussqlsh
+CamusDB SQL Shell
