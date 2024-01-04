@@ -1,19 +1,30 @@
 ﻿
+/**
+ * This file is part of CamusDB  
+ *
+ * For the full copyright and license information, please view the LICENSE.txt
+ * file that was distributed with this source code.
+ */
+
 using CamusDB.Client;
 using Spectre.Console;
 using System.Diagnostics;
 
-Console.WriteLine("CamusDB 0.0.1");
+Console.WriteLine("CamusDB 0.0.1\n");
 
 (CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection();
-
 
 while (true)
 {
     try
     {
-        var sql = AnsiConsole.Ask<string>("camus> ");
-        //Console.WriteLine(sql);
+        string sql = AnsiConsole.Prompt(
+            new TextPrompt<string>("camus> ").            
+            AllowEmpty()
+        );
+        
+        if (string.IsNullOrWhiteSpace(sql))
+            continue;
 
         if (sql == "exit")
             break;
@@ -22,11 +33,10 @@ while (true)
             await ExecuteQuery(connection, sql);
         else
             await ExecuteNonQuery(connection, builder, sql);
-
     }
     catch (Exception ex)
     {
-        Console.WriteLine("{0} {1}", ex.Message, ex.StackTrace);
+        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", ex.GetType().Name, ex.Message);        
     }
 }
 
@@ -38,19 +48,17 @@ static async Task ExecuteNonQuery(CamusConnection connection, CamusConnectionStr
 
     int affected = await cmd.ExecuteNonQueryAsync();
 
-    Console.WriteLine("Query OK, {0} row affected ({1})", affected, stopwatch.Elapsed);
+    if (affected == 1)
+        AnsiConsole.MarkupLine("Query OK, [blue]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
+    else if (affected > 1)
+        AnsiConsole.MarkupLine("Query OK, [blue]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
+    else
+        AnsiConsole.MarkupLine("Query OK, [yellow]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
 }
 
 static async Task ExecuteQuery(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateSelectCommand(sql);
-
-    /*cmd.Parameters.Add("@id", ColumnType.Id, CamusObjectIdGenerator.Generate());
-    cmd.Parameters.Add("@name", ColumnType.String, Guid.NewGuid().ToString()[..20]);
-    cmd.Parameters.Add("@type", ColumnType.String, "mechanical");
-    cmd.Parameters.Add("@year", ColumnType.Integer64, Random.Shared.Next(1900, 2050));*/
-
-    //Assert.Equal(1, await cmd.ExecuteNonQueryAsync());        
 
     int rows = 0;
     Table? table = null;
@@ -84,6 +92,8 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
                 row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? item.Value.StrValue!.ToString() : "";
             else if (item.Value.Type == ColumnType.Integer64)
                 row[i++] = item.Value.LongValue.ToString();
+            else if (item.Value.Type == ColumnType.Float)
+                row[i++] = item.Value.LongValue.ToString();
             else if (item.Value.Type == ColumnType.Bool)
                 row[i++] = item.Value.BoolValue.ToString();
             else
@@ -97,7 +107,7 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
     if (table is not null)
         AnsiConsole.Write(table);
 
-    Console.WriteLine("{0} rows in set ({1})", rows, duration);
+    Console.WriteLine("{0} rows in set ({1})\n", rows, duration);
 }
 
 static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection()
