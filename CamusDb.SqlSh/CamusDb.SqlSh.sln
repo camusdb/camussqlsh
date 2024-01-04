@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 16
+VisualStudioVersion = 25.0.1706.7
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CamusDb.SqlSh", "CamusDb.SqlSh.csproj", "{1F9C8D88-DE73-44D8-8FCA-EF4AB2164962}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1F9C8D88-DE73-44D8-8FCA-EF4AB2164962}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1F9C8D88-DE73-44D8-8FCA-EF4AB2164962}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1F9C8D88-DE73-44D8-8FCA-EF4AB2164962}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1F9C8D88-DE73-44D8-8FCA-EF4AB2164962}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B4B351CB-8E7D-42D6-B207-61864C5C3BA7}
+	EndGlobalSection
+EndGlobal
