@@ -10,8 +10,28 @@ using CamusDB.Client;
 using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
+using System.Text.Json;
 
 Console.WriteLine("CamusDB 0.0.1\n");
+
+List<string>? history = new();
+
+string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
+
+if (File.Exists(historyPath))
+{
+    try
+    {
+        string historyText = await File.ReadAllTextAsync(historyPath);
+        history = JsonSerializer.Deserialize<List<string>>(historyText);
+    }
+    catch
+    {
+        Console.WriteLine("Found invalid history");
+    }
+}
+
+history ??= new();
 
 (CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection();
 
@@ -21,10 +41,10 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 {
     editor = new()
     {
-        MultiLine = true,
+        MultiLine = false,
         Text = "",
         Prompt = new MyLineNumberPrompt(new Style(foreground: Color.Yellow, background: Color.Black)),
-        //Completion = new TestCompletion(),
+        //Completion = new TestCompletion(),        
         Highlighter = new WordHighlighter()
                         .AddWord("select", new Style(foreground: Color.Blue))
                         .AddWord("update", new Style(foreground: Color.Blue))
@@ -32,8 +52,20 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
                         .AddWord("where", new Style(foreground: Color.Blue))
                         .AddWord("order", new Style(foreground: Color.Blue))
                         .AddWord("by", new Style(foreground: Color.Blue))
+                        .AddWord("table", new Style(foreground: Color.Blue))
+                        .AddWord("set", new Style(foreground: Color.Blue))
+                        .AddWord("create", new Style(foreground: Color.Blue))
+                        .AddWord("primary", new Style(foreground: Color.Blue))
+                        .AddWord("key", new Style(foreground: Color.Blue))
+                        .AddWord("index", new Style(foreground: Color.Blue))
                         .AddWord("limit", new Style(foreground: Color.Blue))
     };
+
+    if (history != null)
+    {
+        foreach (string item in history)
+            editor.History.Add(item);
+    }
 }
 
 while (true)
@@ -51,16 +83,22 @@ while (true)
             continue;
 
         if (sql == "exit")
+        {
+            await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
             break;
+        }
+
+        // Add some history
+        if (editor is not null)
+            editor.History.Add(sql);
+
+        if (history is not null)
+            history.Add(sql);
 
         if (sql.Trim().StartsWith("select ", StringComparison.InvariantCultureIgnoreCase))
             await ExecuteQuery(connection, sql);
         else
             await ExecuteNonQuery(builder, sql);
-
-        // Add some history
-        if (editor is not null)
-            editor.History.Add(sql);
     }
     catch (Exception ex)
     {
@@ -164,6 +202,7 @@ static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection
     return (cmConnection, builder);
 }
 
+
 public sealed class MyLineNumberPrompt : ILineEditorPrompt
 {
     private readonly Style _style;
@@ -178,3 +217,4 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
         return (new Markup("camus> ", _style), 1);
     }
 }
+
