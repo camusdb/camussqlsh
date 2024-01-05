@@ -7,6 +7,7 @@
  */
 
 using CamusDB.Client;
+using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
 
@@ -14,15 +15,38 @@ Console.WriteLine("CamusDB 0.0.1\n");
 
 (CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection();
 
+LineEditor? editor = null;
+
+if (LineEditor.IsSupported(AnsiConsole.Console))
+{
+    editor = new()
+    {
+        MultiLine = true,
+        Text = "",
+        Prompt = new MyLineNumberPrompt(new Style(foreground: Color.Yellow, background: Color.Black)),
+        //Completion = new TestCompletion(),
+        Highlighter = new WordHighlighter()
+                        .AddWord("select", new Style(foreground: Color.Blue))
+                        .AddWord("update", new Style(foreground: Color.Blue))
+                        .AddWord("from", new Style(foreground: Color.Blue))
+                        .AddWord("where", new Style(foreground: Color.Blue))
+                        .AddWord("order", new Style(foreground: Color.Blue))
+                        .AddWord("by", new Style(foreground: Color.Blue))
+                        .AddWord("limit", new Style(foreground: Color.Blue))
+    };
+}
+
 while (true)
 {
     try
     {
-        string sql = AnsiConsole.Prompt(
-            new TextPrompt<string>("camus> ").            
-            AllowEmpty()
-        );
-        
+        string? sql;
+
+        if (editor is not null)
+            sql = await editor.ReadLine(CancellationToken.None);
+        else
+            sql = AnsiConsole.Prompt(new TextPrompt<string>("camus> ").AllowEmpty());
+
         if (string.IsNullOrWhiteSpace(sql))
             continue;
 
@@ -32,15 +56,19 @@ while (true)
         if (sql.Trim().StartsWith("select ", StringComparison.InvariantCultureIgnoreCase))
             await ExecuteQuery(connection, sql);
         else
-            await ExecuteNonQuery(connection, builder, sql);
+            await ExecuteNonQuery(builder, sql);
+
+        // Add some history
+        if (editor is not null)
+            editor.History.Add(sql);
     }
     catch (Exception ex)
     {
-        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", ex.GetType().Name, ex.Message);        
+        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", ex.GetType().Name, ex.Message);
     }
 }
 
-static async Task ExecuteNonQuery(CamusConnection connection, CamusConnectionStringBuilder builder, string sql)
+static async Task ExecuteNonQuery(CamusConnectionStringBuilder builder, string sql)
 {
     using CamusCommand cmd = new CamusCommand(sql, builder);
 
@@ -62,7 +90,7 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
 
     int rows = 0;
     Table? table = null;
-    
+
     Stopwatch stopwatch = Stopwatch.StartNew();
 
     CamusDataReader reader = await cmd.ExecuteReaderAsync();
@@ -134,4 +162,19 @@ static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection
     await cmConnection.OpenAsync();
 
     return (cmConnection, builder);
+}
+
+public sealed class MyLineNumberPrompt : ILineEditorPrompt
+{
+    private readonly Style _style;
+
+    public MyLineNumberPrompt(Style? style = null)
+    {
+        _style = style ?? new Style(foreground: Color.Yellow, background: Color.Blue);
+    }
+
+    public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
+    {
+        return (new Markup("camus> ", _style), 1);
+    }
 }
