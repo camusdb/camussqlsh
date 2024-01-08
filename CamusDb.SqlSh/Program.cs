@@ -98,7 +98,7 @@ while (true)
         if (sql.Trim().StartsWith("select ", StringComparison.InvariantCultureIgnoreCase))
             await ExecuteQuery(connection, sql);
         else
-            await ExecuteNonQuery(builder, sql);
+            await ExecuteNonQuery(connection, sql);
     }
     catch (Exception ex)
     {
@@ -106,9 +106,9 @@ while (true)
     }
 }
 
-static async Task ExecuteNonQuery(CamusConnectionStringBuilder builder, string sql)
+static async Task ExecuteNonQuery(CamusConnection connection, string sql)
 {
-    using CamusCommand cmd = new CamusCommand(sql, builder);
+    using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
     Stopwatch stopwatch = new();
 
@@ -141,8 +141,10 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
 
         if (table is null)
         {
-            table = new();
-            table.Border = TableBorder.Square;
+            table = new()
+            {
+                Border = TableBorder.Square
+            };
 
             foreach (KeyValuePair<string, ColumnValue> item in current)
                 table.AddColumn(item.Key);
@@ -155,7 +157,7 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
         foreach (KeyValuePair<string, ColumnValue> item in current)
         {
             if (item.Value.Type == ColumnType.Id || item.Value.Type == ColumnType.String)
-                row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? item.Value.StrValue!.ToString() : "";
+                row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? Markup.Escape(item.Value.StrValue!.ToString()) : "";
             else if (item.Value.Type == ColumnType.Integer64)
                 row[i++] = item.Value.LongValue.ToString();
             else if (item.Value.Type == ColumnType.Float)
