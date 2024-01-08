@@ -59,6 +59,13 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
                         .AddWord("key", new Style(foreground: Color.Blue))
                         .AddWord("index", new Style(foreground: Color.Blue))
                         .AddWord("limit", new Style(foreground: Color.Blue))
+                        .AddWord("insert", new Style(foreground: Color.Blue))
+                        .AddWord("into", new Style(foreground: Color.Blue))
+                        .AddWord("values", new Style(foreground: Color.Blue))
+                        .AddWord("delete", new Style(foreground: Color.Blue))
+                        .AddWord("alter", new Style(foreground: Color.Blue))
+                        .AddWord("column", new Style(foreground: Color.Blue))
+                        .AddWord("drop", new Style(foreground: Color.Blue))
     };
 
     if (history != null)
@@ -110,7 +117,7 @@ static async Task ExecuteNonQuery(CamusConnectionStringBuilder builder, string s
 {
     using CamusCommand cmd = new CamusCommand(sql, builder);
 
-    Stopwatch stopwatch = new();
+    Stopwatch stopwatch = Stopwatch.StartNew();
 
     int affected = await cmd.ExecuteNonQueryAsync();
 
