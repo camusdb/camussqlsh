@@ -7,12 +7,19 @@
  */
 
 using CamusDB.Client;
+using CommandLine;
 using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
 using System.Text.Json;
 
-Console.WriteLine("CamusDB 0.0.1\n");
+Console.WriteLine("CamusDB SQL Shell 0.0.3\n");
+
+ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
+
+Options? opts = optsResult.Value;
+if (opts is null)
+    return;
 
 List<string>? history = new();
 
@@ -33,7 +40,7 @@ if (File.Exists(historyPath))
 
 history ??= new();
 
-(CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection();
+(CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection(opts);
 
 LineEditor? editor = null;
 
@@ -185,7 +192,7 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
     Console.WriteLine("{0} rows in set ({1})\n", rows, duration);
 }
 
-static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection()
+static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection(Options opts)
 {
     CamusConnection cmConnection;
 
@@ -195,7 +202,10 @@ static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection
         MaximumActiveSessions = 200,
     };
 
-    string connectionString = $"Endpoint=https://localhost:7141;Database=test";
+    string? connectionString = opts.ConnectionSource;
+
+    if (string.IsNullOrEmpty(connectionString))
+        connectionString = $"Endpoint=https://localhost:7141;Database=test";
 
     SessionPoolManager manager = SessionPoolManager.Create(options);
 
@@ -227,3 +237,8 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
     }
 }
 
+public class Options
+{
+    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]    
+    public string? ConnectionSource { get; set; }
+}
