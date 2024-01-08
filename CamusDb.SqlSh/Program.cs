@@ -21,26 +21,11 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-List<string>? history = new();
-
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
-if (File.Exists(historyPath))
-{
-    try
-    {
-        string historyText = await File.ReadAllTextAsync(historyPath);
-        history = JsonSerializer.Deserialize<List<string>>(historyText);
-    }
-    catch
-    {
-        Console.WriteLine("Found invalid history");
-    }
-}
+List<string>? history = await GetHistory(historyPath);
 
-history ??= new();
-
-(CamusConnection connection, CamusConnectionStringBuilder builder) = await GetConnection(opts);
+CamusConnection connection = await GetConnection(opts);
 
 LineEditor? editor = null;
 
@@ -73,6 +58,20 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
                         .AddWord("alter", new Style(foreground: Color.Blue))
                         .AddWord("column", new Style(foreground: Color.Blue))
                         .AddWord("drop", new Style(foreground: Color.Blue))
+                        .AddWord("null", new Style(foreground: Color.Blue))
+                        .AddWord("not", new Style(foreground: Color.Blue))
+                        .AddWord("string", new Style(foreground: Color.Blue))
+                        .AddWord("int64", new Style(foreground: Color.Blue))
+                        .AddWord("float", new Style(foreground: Color.Blue))
+                        .AddWord("oid", new Style(foreground: Color.Blue))
+                        .AddWord("is", new Style(foreground: Color.Blue))
+                        .AddWord("add", new Style(foreground: Color.Blue))
+                        .AddWord("show", new Style(foreground: Color.Blue))
+                        .AddWord("use", new Style(foreground: Color.Blue))
+                        .AddWord("tables", new Style(foreground: Color.Blue))
+                        .AddWord("view", new Style(foreground: Color.Blue))
+                        .AddWord("views", new Style(foreground: Color.Blue))
+                        .AddWord("columns", new Style(foreground: Color.Blue))
     };
 
     if (history != null)
@@ -98,7 +97,7 @@ while (true)
 
         if (sql == "exit")
         {
-            await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+            await SaveHistory(historyPath, history);
             break;
         }
 
@@ -109,8 +108,10 @@ while (true)
         if (history is not null)
             history.Add(sql);
 
-        if (sql.Trim().StartsWith("select ", StringComparison.InvariantCultureIgnoreCase))
+        if (IsQueryable(sql))
             await ExecuteQuery(connection, sql);
+        else if (IsDDL(sql))
+            await ExecuteDDL(connection, sql);
         else
             await ExecuteNonQuery(connection, sql);
     }
@@ -118,6 +119,12 @@ while (true)
     {
         AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", ex.GetType().Name, ex.Message);
     }
+}
+
+static async Task SaveHistory(string historyPath, List<string>? history)
+{
+    if (history is not null)
+        await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
 static async Task ExecuteNonQuery(CamusConnection connection, string sql)
@@ -170,7 +177,9 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
 
         foreach (KeyValuePair<string, ColumnValue> item in current)
         {
-            if (item.Value.Type == ColumnType.Id || item.Value.Type == ColumnType.String)
+            if (item.Value.Type == ColumnType.Id)
+                row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? item.Value.StrValue!.ToString() : "";
+            else if (item.Value.Type == ColumnType.String)
                 row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? Markup.Escape(item.Value.StrValue!.ToString()) : "";
             else if (item.Value.Type == ColumnType.Integer64)
                 row[i++] = item.Value.LongValue.ToString();
@@ -189,17 +198,50 @@ static async Task ExecuteQuery(CamusConnection connection, string sql)
     if (table is not null)
         AnsiConsole.Write(table);
 
-    Console.WriteLine("{0} rows in set ({1})\n", rows, duration);
+    AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
 }
 
-static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection(Options opts)
+static async Task ExecuteDDL(CamusConnection connection, string sql)
+{
+    using CamusCommand cmd = connection.CreateCamusCommand(sql);
+
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    bool success = await cmd.ExecuteDDLAsync();
+
+    if (success)        
+        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);    
+}
+
+static bool IsQueryable(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("select ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("desc ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static bool IsDDL(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static async Task<CamusConnection> GetConnection(Options opts)
 {
     CamusConnection cmConnection;
 
     SessionPoolOptions options = new()
     {
-        MinimumPooledSessions = 100,
-        MaximumActiveSessions = 200,
+        MinimumPooledSessions = 1,
+        MaximumActiveSessions = 20,
     };
 
     string? connectionString = opts.ConnectionSource;
@@ -218,9 +260,34 @@ static async Task<(CamusConnection, CamusConnectionStringBuilder)> GetConnection
 
     await cmConnection.OpenAsync();
 
-    return (cmConnection, builder);
+    CamusPingCommand pingCommand = cmConnection.CreatePingCommand();
+
+    await pingCommand.ExecuteNonQueryAsync();
+
+    return cmConnection;
 }
 
+static async Task<List<string>> GetHistory(string historyPath)
+{
+    List<string>? history = new();    
+
+    if (File.Exists(historyPath))
+    {
+        try
+        {
+            string historyText = await File.ReadAllTextAsync(historyPath);
+            history = JsonSerializer.Deserialize<List<string>>(historyText);
+        }
+        catch
+        {
+            Console.WriteLine("Found invalid history");
+        }
+    }
+
+    history ??= new();
+
+    return history;
+}
 
 public sealed class MyLineNumberPrompt : ILineEditorPrompt
 {
@@ -237,8 +304,8 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
     }
 }
 
-public class Options
+public sealed class Options
 {
-    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]    
+    [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
     public string? ConnectionSource { get; set; }
 }

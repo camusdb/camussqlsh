@@ -2,14 +2,14 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net6.0;net7.0;net8.0</TargetFrameworks>
+    <TargetFrameworks>net6.0;net7.0</TargetFrameworks>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>camus-cli</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
     <PackageId>CamusDB.SqlSh</PackageId>
-    <Version>0.0.3</Version>
+    <Version>0.0.5</Version>
     <Description>camus-cli is a command-line interface for interacting with CamusDB</Description>
     <Authors>CamusDB</Authors>
     <Company>CamusDB</Company>    
@@ -24,7 +24,7 @@
 
   <ItemGroup>
     <PackageReference Include="Spectre.Console" Version="0.48.0" />
-    <PackageReference Include="CamusDB.Client" Version="0.0.5-alpha" />    
+    <PackageReference Include="CamusDB.Client" Version="0.0.6-alpha" />    
     <PackageReference Include="CsvHelper" Version="30.0.1" />
     <PackageReference Include="CommandLineParser" Version="2.9.1" />
   </ItemGroup>
