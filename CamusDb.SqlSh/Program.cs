@@ -11,6 +11,7 @@ using CommandLine;
 using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 
 Console.WriteLine("CamusDB SQL Shell 0.0.3\n");
@@ -95,10 +96,22 @@ while (true)
         if (string.IsNullOrWhiteSpace(sql))
             continue;
 
-        if (sql == "exit")
+        if (string.Equals(sql.Trim(), "exit", StringComparison.InvariantCultureIgnoreCase))
         {
             await SaveHistory(historyPath, history);
             break;
+        }
+
+        if (string.Equals(sql.Trim(), "clear", StringComparison.InvariantCultureIgnoreCase))
+        {
+            AnsiConsole.Clear();
+            continue;
+        }
+
+        if (sql.Trim().StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            await LoadSource(connection, sql.Trim()[7..].Trim());
+            continue;
         }
 
         // Add some history
@@ -117,8 +130,73 @@ while (true)
     }
     catch (Exception ex)
     {
-        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", ex.GetType().Name, ex.Message);
+        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
     }
+}
+
+static async Task LoadSource(CamusConnection connection, string paths)
+{
+    if (!File.Exists(paths))
+    {
+        AnsiConsole.Markup("[red]File not found: {0}[/]", Markup.Escape(paths));
+        return;
+    }
+
+    string fileContents = await File.ReadAllTextAsync(paths);
+
+    foreach (string sql in EscapeStringIntoLines(fileContents))
+    {
+        if (string.IsNullOrEmpty(sql))
+            continue;
+
+        if (IsQueryable(sql))
+            await ExecuteQuery(connection, sql);
+        else if (IsDDL(sql))
+            await ExecuteDDL(connection, sql);
+        else
+            await ExecuteNonQuery(connection, sql);
+    }
+}
+
+static IEnumerable<string> EscapeStringIntoLines(string input)
+{
+    StringBuilder currentLine = new();
+    bool inSingleQuote = false, inDoubleQuote = false;
+
+    for (int i = 0; i < input.Length; i++)
+    {
+        char c = input[i];
+
+        // Check for escaped quotes
+        if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '\'' || input[i + 1] == '\"'))
+        {
+            currentLine.Append(c); // Append the escape character
+            currentLine.Append(input[++i]); // Append the quote and skip next character
+            continue;
+        }
+
+        if (c == '\'' && !inDoubleQuote)
+        {
+            inSingleQuote = !inSingleQuote;
+        }
+        else if (c == '\"' && !inSingleQuote)
+        {
+            inDoubleQuote = !inDoubleQuote;
+        }
+
+        if (c == ';' && !inSingleQuote && !inDoubleQuote)
+        {
+            yield return currentLine.ToString().Trim();
+            currentLine.Clear();
+        }
+        else
+        {
+            currentLine.Append(c);
+        }
+    }
+
+    if (currentLine.Length > 0)
+        yield return currentLine.ToString().Trim();
 }
 
 static async Task SaveHistory(string historyPath, List<string>? history)
@@ -209,8 +287,8 @@ static async Task ExecuteDDL(CamusConnection connection, string sql)
 
     bool success = await cmd.ExecuteDDLAsync();
 
-    if (success)        
-        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);    
+    if (success)
+        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
 }
 
 static bool IsQueryable(string sql)
@@ -269,7 +347,7 @@ static async Task<CamusConnection> GetConnection(Options opts)
 
 static async Task<List<string>> GetHistory(string historyPath)
 {
-    List<string>? history = new();    
+    List<string>? history = new();
 
     if (File.Exists(historyPath))
     {

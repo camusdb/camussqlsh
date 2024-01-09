@@ -161,7 +161,6 @@ namespace RadLine
                 var key = await _input.ReadKey(MultiLine, cancellationToken).ConfigureAwait(false);
 
                 // Console.WriteLine(key.Value.Key);
-
                 if (key != null)
                 {
                     if (key.Value.KeyChar != 0 && !char.IsControl(key.Value.KeyChar))
