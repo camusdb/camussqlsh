@@ -14,13 +14,13 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.3\n");
-
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
 
 Options? opts = optsResult.Value;
 if (opts is null)
     return;
+
+Console.WriteLine("CamusDB SQL Shell 0.0.3\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -32,47 +32,59 @@ LineEditor? editor = null;
 
 if (LineEditor.IsSupported(AnsiConsole.Console))
 {
+    string[] keywords = new string[] {
+        "select",
+        "update",
+        "from",
+        "where",
+        "order",
+        "by",
+        "asc",
+        "desc",
+        "table",
+        "set",
+        "create",
+        "primary",
+        "key",
+        "index",
+        "limit",
+        "insert",
+        "into",
+        "values",
+        "delete",
+        "alter",
+        "column",
+        "drop",
+        "null",
+        "not",
+        "string",
+        "int64",
+        "float",
+        "oid",
+        "is",
+        "add",
+        "show",
+        "use",
+        "tables",
+        "view",
+        "views",
+        "columns",
+        "offset"
+    };
+
+    WordHighlighter worldHighlighter = new();
+    Style style = new(foreground: Color.Blue);
+
+    foreach (string keyword in keywords)
+        worldHighlighter.AddWord(keyword, style);
+
     editor = new()
     {
         MultiLine = false,
         Text = "",
         Prompt = new MyLineNumberPrompt(new Style(foreground: Color.Yellow, background: Color.Black)),
         //Completion = new TestCompletion(),        
-        Highlighter = new WordHighlighter()
-                        .AddWord("select", new Style(foreground: Color.Blue))
-                        .AddWord("update", new Style(foreground: Color.Blue))
-                        .AddWord("from", new Style(foreground: Color.Blue))
-                        .AddWord("where", new Style(foreground: Color.Blue))
-                        .AddWord("order", new Style(foreground: Color.Blue))
-                        .AddWord("by", new Style(foreground: Color.Blue))
-                        .AddWord("table", new Style(foreground: Color.Blue))
-                        .AddWord("set", new Style(foreground: Color.Blue))
-                        .AddWord("create", new Style(foreground: Color.Blue))
-                        .AddWord("primary", new Style(foreground: Color.Blue))
-                        .AddWord("key", new Style(foreground: Color.Blue))
-                        .AddWord("index", new Style(foreground: Color.Blue))
-                        .AddWord("limit", new Style(foreground: Color.Blue))
-                        .AddWord("insert", new Style(foreground: Color.Blue))
-                        .AddWord("into", new Style(foreground: Color.Blue))
-                        .AddWord("values", new Style(foreground: Color.Blue))
-                        .AddWord("delete", new Style(foreground: Color.Blue))
-                        .AddWord("alter", new Style(foreground: Color.Blue))
-                        .AddWord("column", new Style(foreground: Color.Blue))
-                        .AddWord("drop", new Style(foreground: Color.Blue))
-                        .AddWord("null", new Style(foreground: Color.Blue))
-                        .AddWord("not", new Style(foreground: Color.Blue))
-                        .AddWord("string", new Style(foreground: Color.Blue))
-                        .AddWord("int64", new Style(foreground: Color.Blue))
-                        .AddWord("float", new Style(foreground: Color.Blue))
-                        .AddWord("oid", new Style(foreground: Color.Blue))
-                        .AddWord("is", new Style(foreground: Color.Blue))
-                        .AddWord("add", new Style(foreground: Color.Blue))
-                        .AddWord("show", new Style(foreground: Color.Blue))
-                        .AddWord("use", new Style(foreground: Color.Blue))
-                        .AddWord("tables", new Style(foreground: Color.Blue))
-                        .AddWord("view", new Style(foreground: Color.Blue))
-                        .AddWord("views", new Style(foreground: Color.Blue))
-                        .AddWord("columns", new Style(foreground: Color.Blue))
+        Highlighter = worldHighlighter
     };
 
     if (history != null)

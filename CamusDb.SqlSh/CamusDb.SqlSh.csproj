@@ -9,7 +9,7 @@
     <ToolCommandName>camus-cli</ToolCommandName>
     <PackageOutputPath>./nupkg</PackageOutputPath>
     <PackageId>CamusDB.SqlSh</PackageId>
-    <Version>0.0.5</Version>
+    <Version>0.0.6</Version>
     <Description>camus-cli is a command-line interface for interacting with CamusDB</Description>
     <Authors>CamusDB</Authors>
     <Company>CamusDB</Company>    
