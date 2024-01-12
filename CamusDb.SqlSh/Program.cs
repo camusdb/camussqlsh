@@ -20,7 +20,7 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.3\n");
+Console.WriteLine("CamusDB SQL Shell 0.0.7\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -47,6 +47,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "primary",
         "key",
         "index",
+        "indexes",
         "limit",
         "insert",
         "into",
@@ -62,6 +63,13 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "float",
         "oid",
         "is",
+        "on",
+        "in",
+        "or",
+        "and",
+        "between",
+        "like",
+        "ilike",
         "add",
         "show",
         "use",
@@ -69,20 +77,47 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "view",
         "views",
         "columns",
-        "offset"
+        "offset",
+        "unique",
+        "having"
+    };
+
+    string[] functions = new string[] {
+        "count",
+        "distinct",
+        "max",
+        "min",
+        "avg",
+        "sum"
+    };
+
+    string[] commands = new string[] {
+        "clear",
+        "source",
+        "use",
+        "exit",
     };
 
     WordHighlighter worldHighlighter = new();
-    Style style = new(foreground: Color.Blue);
+
+    Style funcStyle = new(foreground: Color.Aqua);
+    Style keywordStyle = new(foreground: Color.Blue);
+    Style commandStyle = new(foreground: Color.LightSkyBlue1);
 
     foreach (string keyword in keywords)
-        worldHighlighter.AddWord(keyword, style);
+        worldHighlighter.AddWord(keyword, keywordStyle);
+
+    foreach (string func in functions)
+        worldHighlighter.AddWord(func, funcStyle);
+
+    foreach (string command in commands)
+        worldHighlighter.AddWord(command, commandStyle);
 
     editor = new()
     {
         MultiLine = false,
         Text = "",
-        Prompt = new MyLineNumberPrompt(new Style(foreground: Color.Yellow, background: Color.Black)),
+        Prompt = new MyLineNumberPrompt(new Style(foreground: Color.PaleTurquoise1)),
         //Completion = new TestCompletion(),        
         Highlighter = worldHighlighter
     };
@@ -108,21 +143,23 @@ while (true)
         if (string.IsNullOrWhiteSpace(sql))
             continue;
 
-        if (string.Equals(sql.Trim(), "exit", StringComparison.InvariantCultureIgnoreCase))
+        string sqlTrim = sql.Trim();
+
+        if (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase))
         {
             await SaveHistory(historyPath, history);
             break;
         }
 
-        if (string.Equals(sql.Trim(), "clear", StringComparison.InvariantCultureIgnoreCase))
+        if (string.Equals(sqlTrim, "clear", StringComparison.InvariantCultureIgnoreCase))
         {
             AnsiConsole.Clear();
             continue;
         }
 
-        if (sql.Trim().StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
+        if (sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
         {
-            await LoadSource(connection, sql.Trim()[7..].Trim());
+            await LoadSource(connection, sqlTrim[7..].Trim());
             continue;
         }
 
