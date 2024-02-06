@@ -20,7 +20,7 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.7\n");
+Console.WriteLine("CamusDB SQL Shell 0.0.8\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -29,6 +29,7 @@ List<string>? history = await GetHistory(historyPath);
 CamusConnection connection = await GetConnection(opts);
 
 LineEditor? editor = null;
+CamusTransaction? transaction = null;
 
 if (LineEditor.IsSupported(AnsiConsole.Console))
 {
@@ -79,7 +80,12 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "columns",
         "offset",
         "unique",
-        "having"
+        "having",
+        "begin",
+        "start",
+        "transaction",
+        "commit",
+        "rollback",
     };
 
     string[] functions = new string[] {
@@ -174,6 +180,12 @@ while (true)
             await ExecuteQuery(connection, sql);
         else if (IsDDL(sql))
             await ExecuteDDL(connection, sql);
+        else if (IsBeginTx(sql))
+            await ExecuteBeginTx(connection);
+        else if (IsCommitTx(sql))
+            await ExecuteCommitTx(connection);
+        else if (IsRollbackTx(sql))
+            await ExecuteRollbackTx(connection);
         else
             await ExecuteNonQuery(connection, sql);
     }
@@ -183,7 +195,7 @@ while (true)
     }
 }
 
-static async Task LoadSource(CamusConnection connection, string paths)
+async Task LoadSource(CamusConnection connection, string paths)
 {
     if (!File.Exists(paths))
     {
@@ -202,6 +214,12 @@ static async Task LoadSource(CamusConnection connection, string paths)
             await ExecuteQuery(connection, sql);
         else if (IsDDL(sql))
             await ExecuteDDL(connection, sql);
+        else if (IsBeginTx(sql))
+            await ExecuteBeginTx(connection);
+        else if (IsCommitTx(sql))
+            await ExecuteCommitTx(connection);
+        else if (IsRollbackTx(sql))
+            await ExecuteRollbackTx(connection);
         else
             await ExecuteNonQuery(connection, sql);
     }
@@ -254,9 +272,11 @@ static async Task SaveHistory(string historyPath, List<string>? history)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
-static async Task ExecuteNonQuery(CamusConnection connection, string sql)
+async Task ExecuteNonQuery(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateCamusCommand(sql);
+
+    cmd.Transaction = transaction;
 
     Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -270,9 +290,60 @@ static async Task ExecuteNonQuery(CamusConnection connection, string sql)
         AnsiConsole.MarkupLine("Query OK, [yellow]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
 }
 
-static async Task ExecuteQuery(CamusConnection connection, string sql)
+async Task ExecuteBeginTx(CamusConnection connection)
+{
+    if (transaction is not null)
+    {
+        AnsiConsole.MarkupLine("[red]There's an active transaction already[/]");
+        return;
+    }
+
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    transaction = await connection.BeginTransactionAsync();
+
+    AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
+}
+
+async Task ExecuteCommitTx(CamusConnection connection)
+{
+    if (transaction is null)
+    {
+        AnsiConsole.MarkupLine("[red]There's no active transaction[/]");
+        return;
+    }
+
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    await transaction.CommitAsync();
+
+    AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
+
+    transaction = null;
+}
+
+async Task ExecuteRollbackTx(CamusConnection connection)
+{
+    if (transaction is null)
+    {
+        AnsiConsole.MarkupLine("[red]There's no active transaction[/]");
+        return;
+    }
+
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    await transaction.RollbackAsync();
+
+    AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
+
+    transaction = null;
+}
+
+async Task ExecuteQuery(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateSelectCommand(sql);
+
+    cmd.Transaction = transaction;
 
     int rows = 0;
     Table? table = null;
@@ -339,6 +410,29 @@ static async Task ExecuteDDL(CamusConnection connection, string sql)
     if (success)
         AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
 }
+
+static bool IsBeginTx(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("begin", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("start", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static bool IsCommitTx(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("commit", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static bool IsRollbackTx(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("rollback", StringComparison.InvariantCultureIgnoreCase);
+}
+
 
 static bool IsQueryable(string sql)
 {
