@@ -135,6 +135,20 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     }
 }
 
+Console.CancelKeyPress += delegate
+{
+    AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
+
+    if (transaction is not null)
+    {        
+        AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
+
+        ExecuteRollbackTx(connection).Wait();
+    }
+    
+    SaveHistory(historyPath, history).Wait();
+};
+
 while (true)
 {
     try
@@ -153,6 +167,12 @@ while (true)
 
         if (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase))
         {
+            if (transaction is not null)
+            {
+                AnsiConsole.MarkupLine("[red]There's an active transaction, please commit or rollback before exit[/]");
+                continue;
+            }
+
             await SaveHistory(historyPath, history);
             break;
         }
