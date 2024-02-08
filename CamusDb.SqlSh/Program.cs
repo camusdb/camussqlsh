@@ -61,7 +61,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "not",
         "string",
         "int64",
-        "float",
+        "float64",
         "oid",
         "is",
         "on",
@@ -203,12 +203,16 @@ async Task LoadSource(CamusConnection connection, string paths)
         return;
     }
 
+    int numberLine = 0;
     string fileContents = await File.ReadAllTextAsync(paths);
 
     foreach (string sql in EscapeStringIntoLines(fileContents))
     {
         if (string.IsNullOrEmpty(sql))
+        {
+            numberLine++;
             continue;
+        }
 
         if (IsQueryable(sql))
             await ExecuteQuery(connection, sql);
@@ -222,6 +226,8 @@ async Task LoadSource(CamusConnection connection, string paths)
             await ExecuteRollbackTx(connection);
         else
             await ExecuteNonQuery(connection, sql);
+
+        numberLine++;
     }
 }
 
@@ -381,8 +387,8 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
                 row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? Markup.Escape(item.Value.StrValue!.ToString()) : "";
             else if (item.Value.Type == ColumnType.Integer64)
                 row[i++] = item.Value.LongValue.ToString();
-            else if (item.Value.Type == ColumnType.Float)
-                row[i++] = item.Value.LongValue.ToString();
+            else if (item.Value.Type == ColumnType.Float64)
+                row[i++] = item.Value.FloatValue.ToString();
             else if (item.Value.Type == ColumnType.Bool)
                 row[i++] = item.Value.BoolValue.ToString();
             else
