@@ -135,6 +135,29 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     }
 }
 
+Console.CancelKeyPress += delegate
+{
+    AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
+
+    if (transaction is not null)
+    {        
+        AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
+
+        ExecuteRollbackTx(connection).Wait();
+    }
+    
+    SaveHistory(historyPath, history).Wait();
+};
+
+while (true)
+{
+    try
+    {
+        foreach (string item in history)
+            editor.History.Add(item);
+    }
+}
+
 while (true)
 {
     try
@@ -153,6 +176,12 @@ while (true)
 
         if (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase))
         {
+            if (transaction is not null)
+            {
+                AnsiConsole.MarkupLine("[red]There's an active transaction, please commit or rollback before exit[/]");
+                continue;
+            }
+
             await SaveHistory(historyPath, history);
             break;
         }
@@ -282,6 +311,7 @@ async Task ExecuteNonQuery(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
+    cmd.CommandTimeout = 60;
     cmd.Transaction = transaction;
 
     Stopwatch stopwatch = Stopwatch.StartNew();
@@ -349,6 +379,7 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
+    cmd.CommandTimeout = 60;
     cmd.Transaction = transaction;
 
     int rows = 0;
@@ -408,6 +439,8 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
 static async Task ExecuteDDL(CamusConnection connection, string sql)
 {
     using CamusCommand cmd = connection.CreateCamusCommand(sql);
+
+    cmd.CommandTimeout = 60;
 
     Stopwatch stopwatch = Stopwatch.StartNew();
 
