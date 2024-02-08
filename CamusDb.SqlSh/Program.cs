@@ -20,7 +20,7 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.8\n");
+Console.WriteLine("CamusDB SQL Shell 0.0.10 (alpha)\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -148,15 +148,6 @@ Console.CancelKeyPress += delegate
     
     SaveHistory(historyPath, history).Wait();
 };
-
-while (true)
-{
-    try
-    {
-        foreach (string item in history)
-            editor.History.Add(item);
-    }
-}
 
 while (true)
 {
