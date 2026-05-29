@@ -55,9 +55,9 @@ namespace RadLine.Tests
             var editor = new LineEditor(
                 new TestConsole(),
                 new TestInputSource()
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.UpArrow)
                     .PushEnter());
 
             editor.History.Add("Foo");
@@ -78,11 +78,11 @@ namespace RadLine.Tests
             var editor = new LineEditor(
                 new TestConsole(),
                 new TestInputSource()
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.UpArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.DownArrow, ConsoleModifiers.Control)
-                    .Push(ConsoleKey.DownArrow, ConsoleModifiers.Control)
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.DownArrow)
+                    .Push(ConsoleKey.DownArrow)
                     .PushEnter());
 
             editor.History.Add("Foo");
@@ -106,7 +106,7 @@ namespace RadLine.Tests
             await editor.ReadLine(CancellationToken.None);
 
             // When
-            input.Push(ConsoleKey.UpArrow, ConsoleModifiers.Control).PushEnter();
+            input.Push(ConsoleKey.UpArrow).PushEnter();
             var result = await editor.ReadLine(CancellationToken.None);
 
             // Then

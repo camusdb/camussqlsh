@@ -31,14 +31,14 @@ namespace RadLine.Tests
 
         public TestInputSource Push(char input)
         {
-            var control = char.IsUpper(input);
-            _input.Enqueue(new ConsoleKeyInfo(input, (ConsoleKey)input, false, false, control));
+            var shift = char.IsUpper(input);
+            _input.Enqueue(new ConsoleKeyInfo(input, (ConsoleKey)input, shift, false, false));
             return this;
         }
 
         public TestInputSource Push(ConsoleKey input)
         {
-            _input.Enqueue(new ConsoleKeyInfo((char)input, input, false, false, false));
+            _input.Enqueue(new ConsoleKeyInfo((char)0, input, false, false, false));
             return this;
         }
 
