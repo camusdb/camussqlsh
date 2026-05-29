@@ -20,7 +20,7 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.10 (alpha)\n");
+Console.WriteLine("CamusDB SQL Shell 0.0.12 (alpha)\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -102,6 +102,19 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "source",
         "use",
         "exit",
+        "quit",
+    };
+
+    string[] constants = new string[] {
+        "true",
+        "false",
+    };
+
+    string[] regexes = new string[] {
+        @"(?<number>\b\d+(\.\d+)?\b)",
+        @"(?<singlequote>'(?:\\'|[^'])*')",
+        @"(?<escapedquote>`(?:\\`|[^`])*`)",
+        "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
     };
 
     WordHighlighter worldHighlighter = new();
@@ -109,6 +122,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     Style funcStyle = new(foreground: Color.Aqua);
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
+    Style constantsStyle = new(foreground: Color.LightPink3);
 
     foreach (string keyword in keywords)
         worldHighlighter.AddWord(keyword, keywordStyle);
@@ -119,9 +133,15 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     foreach (string command in commands)
         worldHighlighter.AddWord(command, commandStyle);
 
+    foreach (string constant in constants)
+        worldHighlighter.AddWord(constant, constantsStyle);
+
+    foreach (string regex in regexes)
+        worldHighlighter.AddRegex(regex, constantsStyle);
+
     editor = new()
     {
-        MultiLine = false,
+        MultiLine = true,
         Text = "",
         Prompt = new MyLineNumberPrompt(new Style(foreground: Color.PaleTurquoise1)),
         //Completion = new TestCompletion(),        
@@ -149,6 +169,8 @@ Console.CancelKeyPress += delegate
     SaveHistory(historyPath, history).Wait();
 };
 
+StringBuilder pendingSql = new();
+
 while (true)
 {
     try
@@ -165,7 +187,9 @@ while (true)
 
         string sqlTrim = sql.Trim();
 
-        if (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase))
+        if (pendingSql.Length == 0 &&
+            (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase)
+            || string.Equals(sqlTrim, "quit", StringComparison.InvariantCultureIgnoreCase)))
         {
             if (transaction is not null)
             {
@@ -177,37 +201,39 @@ while (true)
             break;
         }
 
-        if (string.Equals(sqlTrim, "clear", StringComparison.InvariantCultureIgnoreCase))
+        if (pendingSql.Length == 0 && string.Equals(sqlTrim, "clear", StringComparison.InvariantCultureIgnoreCase))
         {
             AnsiConsole.Clear();
             continue;
         }
 
-        if (sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
+        if (pendingSql.Length == 0 && sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
         {
             await LoadSource(connection, sqlTrim[7..].Trim());
             continue;
         }
 
+        string executableSql = pendingSql.Length == 0
+            ? sql
+            : $"{pendingSql}{Environment.NewLine}{sql}";
+
+        if (IsSqlIncomplete(executableSql))
+        {
+            pendingSql.Clear();
+            pendingSql.Append(executableSql);
+            continue;
+        }
+
+        pendingSql.Clear();
+
         // Add some history
         if (editor is not null)
-            editor.History.Add(sql);
+            editor.History.Add(executableSql);
 
         if (history is not null)
-            history.Add(sql);
+            history.Add(executableSql);
 
-        if (IsQueryable(sql))
-            await ExecuteQuery(connection, sql);
-        else if (IsDDL(sql))
-            await ExecuteDDL(connection, sql);
-        else if (IsBeginTx(sql))
-            await ExecuteBeginTx(connection);
-        else if (IsCommitTx(sql))
-            await ExecuteCommitTx(connection);
-        else if (IsRollbackTx(sql))
-            await ExecuteRollbackTx(connection);
-        else
-            await ExecuteNonQuery(connection, sql);
+        await ExecuteSql(connection, executableSql);
     }
     catch (Exception ex)
     {
@@ -234,6 +260,19 @@ async Task LoadSource(CamusConnection connection, string paths)
             continue;
         }
 
+        await ExecuteSql(connection, sql);
+
+        numberLine++;
+    }
+}
+
+async Task ExecuteSql(CamusConnection connection, string input)
+{
+    foreach (string sql in EscapeStringIntoLines(input))
+    {
+        if (string.IsNullOrWhiteSpace(sql))
+            continue;
+
         if (IsQueryable(sql))
             await ExecuteQuery(connection, sql);
         else if (IsDDL(sql))
@@ -246,8 +285,6 @@ async Task LoadSource(CamusConnection connection, string paths)
             await ExecuteRollbackTx(connection);
         else
             await ExecuteNonQuery(connection, sql);
-
-        numberLine++;
     }
 }
 
@@ -290,6 +327,54 @@ static IEnumerable<string> EscapeStringIntoLines(string input)
 
     if (currentLine.Length > 0)
         yield return currentLine.ToString().Trim();
+}
+
+static bool IsSqlIncomplete(string input)
+{
+    string trimmed = input.Trim();
+
+    if (string.IsNullOrEmpty(trimmed))
+        return false;
+
+    int parenDepth = 0;
+    bool inSingleQuote = false;
+    bool inDoubleQuote = false;
+
+    for (int i = 0; i < input.Length; i++)
+    {
+        char c = input[i];
+
+        if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '\'' || input[i + 1] == '"'))
+        {
+            i++;
+            continue;
+        }
+
+        if (c == '\'' && !inDoubleQuote)
+        {
+            inSingleQuote = !inSingleQuote;
+            continue;
+        }
+
+        if (c == '"' && !inSingleQuote)
+        {
+            inDoubleQuote = !inDoubleQuote;
+            continue;
+        }
+
+        if (inSingleQuote || inDoubleQuote)
+            continue;
+
+        if (c == '(')
+            parenDepth++;
+        else if (c == ')' && parenDepth > 0)
+            parenDepth--;
+    }
+
+    if (inSingleQuote || inDoubleQuote || parenDepth > 0)
+        return true;
+
+    return trimmed.EndsWith(",", StringComparison.Ordinal);
 }
 
 static async Task SaveHistory(string historyPath, List<string>? history)
@@ -551,7 +636,7 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
     public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
     {
-        return (new Markup("camus> ", _style), 1);
+        return (new Markup(line == 0 ? "camus> " : "   -> ", _style), 1);
     }
 }
 
