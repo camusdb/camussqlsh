@@ -11,16 +11,23 @@ using CommandLine;
 using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
-ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(args);
+ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(NormalizeBuiltInOptions(args));
 
 Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
-Console.WriteLine("CamusDB SQL Shell 0.0.12 (alpha)\n");
+string? informationalVersion = Assembly.GetExecutingAssembly()
+    .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+    ?.InformationalVersion;
+string version = informationalVersion?.Split('+')[0]
+    ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
+    ?? "unknown";
+Console.WriteLine($"CamusDB SQL Shell {version} (alpha)\n");
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -33,7 +40,7 @@ CamusTransaction? transaction = null;
 
 if (LineEditor.IsSupported(AnsiConsole.Console))
 {
-    string[] keywords = new string[] {
+    string[] keywords = [
         "select",
         "update",
         "from",
@@ -42,13 +49,19 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "by",
         "asc",
         "desc",
+        "describe",
+        "database",
         "table",
         "set",
         "create",
+        "if",
+        "exists",
+        "default",
         "primary",
         "key",
         "index",
         "indexes",
+        "constraint",
         "limit",
         "insert",
         "into",
@@ -62,7 +75,10 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "string",
         "int64",
         "float64",
+        "object_id",
         "oid",
+        "bool",
+        "boolean",
         "is",
         "on",
         "in",
@@ -78,6 +94,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "view",
         "views",
         "columns",
+        "group",
+        "join",
+        "inner",
         "offset",
         "unique",
         "having",
@@ -86,36 +105,37 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "transaction",
         "commit",
         "rollback",
-    };
+        "as"
+    ];
 
-    string[] functions = new string[] {
+    string[] functions = [
         "count",
         "distinct",
         "max",
         "min",
         "avg",
         "sum"
-    };
+    ];
 
-    string[] commands = new string[] {
+    string[] commands = [
         "clear",
         "source",
         "use",
         "exit",
         "quit",
-    };
+    ];
 
-    string[] constants = new string[] {
+    string[] constants = [
         "true",
         "false",
-    };
+    ];
 
-    string[] regexes = new string[] {
+    string[] regexes = [
         @"(?<number>\b\d+(\.\d+)?\b)",
         @"(?<singlequote>'(?:\\'|[^'])*')",
         @"(?<escapedquote>`(?:\\`|[^`])*`)",
         "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
-    };
+    ];
 
     WordHighlighter worldHighlighter = new();
 
@@ -427,11 +447,15 @@ async Task ExecuteCommitTx(CamusConnection connection)
 
     Stopwatch stopwatch = Stopwatch.StartNew();
 
-    await transaction.CommitAsync();
-
-    AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
-
-    transaction = null;
+    try
+    {
+        await transaction.CommitAsync();
+        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
+    }
+    finally
+    {
+        transaction = null;
+    }
 }
 
 async Task ExecuteRollbackTx(CamusConnection connection)
@@ -444,11 +468,15 @@ async Task ExecuteRollbackTx(CamusConnection connection)
 
     Stopwatch stopwatch = Stopwatch.StartNew();
 
-    await transaction.RollbackAsync();
-
-    AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
-
-    transaction = null;
+    try
+    {
+        await transaction.RollbackAsync();
+        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
+    }
+    finally
+    {
+        transaction = null;
+    }
 }
 
 async Task ExecuteQuery(CamusConnection connection, string sql)
@@ -581,9 +609,14 @@ static async Task<CamusConnection> GetConnection(Options opts)
     };
 
     string? connectionString = opts.ConnectionSource;
+    string database = string.IsNullOrWhiteSpace(opts.Database)
+        ? "test"
+        : opts.Database;
 
     if (string.IsNullOrEmpty(connectionString))
-        connectionString = $"Endpoint=https://localhost:7141;Database=test";
+        connectionString = $"Endpoint=https://localhost:7141;Database={database}";
+
+    ValidateConnectionString(connectionString);
 
     SessionPoolManager manager = SessionPoolManager.Create(options);
 
@@ -601,6 +634,29 @@ static async Task<CamusConnection> GetConnection(Options opts)
     await pingCommand.ExecuteNonQueryAsync();
 
     return cmConnection;
+}
+
+static void ValidateConnectionString(string connectionString)
+{
+    Dictionary<string, string> values = connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(part => part.Split('=', 2, StringSplitOptions.TrimEntries))
+        .Where(parts => parts.Length == 2)
+        .GroupBy(parts => parts[0], StringComparer.InvariantCultureIgnoreCase)
+        .ToDictionary(group => group.Key, group => group.Last()[1], StringComparer.InvariantCultureIgnoreCase);
+
+    if (!values.TryGetValue("Endpoint", out string? endpoint) ||
+        string.IsNullOrWhiteSpace(endpoint) ||
+        !Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+    {
+        throw new ArgumentException("Connection string must include a valid Endpoint. Example: Endpoint=http://localhost:5095;Database=wcbets");
+    }
+
+    if (!values.TryGetValue("Database", out string? database) ||
+        string.IsNullOrWhiteSpace(database))
+    {
+        throw new ArgumentException("Connection string must include Database. Example: Endpoint=http://localhost:5095;Database=wcbets");
+    }
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
@@ -625,6 +681,19 @@ static async Task<List<string>> GetHistory(string historyPath)
     return history;
 }
 
+static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
+{
+    foreach (string arg in args)
+    {
+        yield return arg switch
+        {
+            "-h" => "--help",
+            "-v" => "--version",
+            _ => arg
+        };
+    }
+}
+
 public sealed class MyLineNumberPrompt : ILineEditorPrompt
 {
     private readonly Style _style;
@@ -642,6 +711,9 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
 public sealed class Options
 {
+    [Value(0, Required = false, MetaName = "database", HelpText = "Set the database name")]
+    public string? Database { get; set; }
+
     [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
     public string? ConnectionSource { get; set; }
 }

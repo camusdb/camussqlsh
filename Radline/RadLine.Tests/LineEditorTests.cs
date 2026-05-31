@@ -49,6 +49,58 @@ namespace RadLine.Tests
         }
 
         [Fact]
+        public async Task Should_Move_Between_Lines_When_Pressing_Up_And_Down_In_Multiline_Input()
+        {
+            // Given
+            var editor = new LineEditor(
+                new TestConsole(),
+                new TestInputSource()
+                    .Push("first")
+                    .PushNewLine()
+                    .Push("second")
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(" line")
+                    .Push(ConsoleKey.DownArrow)
+                    .Push(" line")
+                    .PushEnter())
+            {
+                MultiLine = true,
+            };
+
+            // When
+            var result = await editor.ReadLine(CancellationToken.None);
+
+            // Then
+            result.ShouldBe($"first line{Environment.NewLine}second line");
+        }
+
+        [Fact]
+        public async Task Should_Move_To_Previous_History_When_Pressing_Up_On_First_Line_In_Multiline_Input()
+        {
+            // Given
+            var editor = new LineEditor(
+                new TestConsole(),
+                new TestInputSource()
+                    .Push("first")
+                    .PushNewLine()
+                    .Push("second")
+                    .Push(ConsoleKey.UpArrow)
+                    .Push(ConsoleKey.UpArrow)
+                    .PushEnter())
+            {
+                MultiLine = true,
+            };
+
+            editor.History.Add("history item");
+
+            // When
+            var result = await editor.ReadLine(CancellationToken.None);
+
+            // Then
+            result.ShouldBe("history item");
+        }
+
+        [Fact]
         public async Task Should_Move_To_Previous_Item_In_History()
         {
             // Given

@@ -169,7 +169,7 @@ namespace RadLine
                     }
                     else
                     {
-                        command = KeyBindings.GetCommand(key.Value.Key, key.Value.Modifiers);
+                        command = GetCommand(state, key.Value);
                     }
                 }
 
@@ -189,6 +189,24 @@ namespace RadLine
                 // Render the line
                 _renderer.RenderLine(state);
             }
+        }
+
+        private LineEditorCommand? GetCommand(LineEditorState state, ConsoleKeyInfo key)
+        {
+            if (MultiLine && state.LineCount > 1 && key.Modifiers == 0)
+            {
+                if (key.Key == ConsoleKey.UpArrow && !state.IsFirstLine)
+                {
+                    return new MoveUpCommand();
+                }
+
+                if (key.Key == ConsoleKey.DownArrow && !state.IsLastLine)
+                {
+                    return new MoveDownCommand();
+                }
+            }
+
+            return KeyBindings.GetCommand(key.Key, key.Modifiers);
         }
 
         private void MoveUp(LineEditorState state)
