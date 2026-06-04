@@ -1,21 +1,492 @@
-# Camus SQL Shell
+# CamusDB SQL Shell
 
-`camus-cli` is a command-line interface for interacting with [CamusDB](https://github.com/camusdb/camusdb). 
-camus-cli is implemented with the dotnet native protocol driver, and connects to the single specified node.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, transactions, and script execution.
 
 ## Installation
 
-Install the `camus-cli` package from NuGet. Add it to your project in the normal way (for example by right-clicking on the project in Visual Studio and choosing "Manage NuGet Packages...").
-
-#### Using .NET CLI
+Install the published NuGet tool:
 
 ```shell
 dotnet tool install --global CamusDB.SqlSh
 ```
 
-## Contribution
+Update an existing installation:
 
-`camus-cli` is an open-source project, and contributions are heartily welcomed! Whether you are looking to fix bugs, add new features, or improve documentation, your efforts and contributions will be appreciated. Check out the CONTRIBUTING.md file for guidelines on how to get started with contributing to `camus-cli`.
+```shell
+dotnet tool update --global CamusDB.SqlSh
+```
+
+Install a local package generated from this repository:
+
+```shell
+dotnet tool install --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
+```
+
+Update from a local package:
+
+```shell
+dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
+```
+
+If the .NET tool cache keeps showing an older version, clear the NuGet caches and update again:
+
+```shell
+dotnet nuget locals all --clear
+dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
+```
+
+## Basic Usage
+
+Start the shell with the default connection:
+
+```shell
+camus-cli
+```
+
+By default, the shell connects to:
+
+```text
+Endpoint=https://localhost:7141;Database=test
+```
+
+Open a specific database using the positional database argument:
+
+```shell
+camus-cli wcbets
+```
+
+This connects to:
+
+```text
+Endpoint=https://localhost:7141;Database=wcbets
+```
+
+Open a custom endpoint and database with a connection string:
+
+```shell
+camus-cli -c "Endpoint=http://localhost:5095;Database=wcbets"
+```
+
+The connection string must include both `Endpoint` and `Database`.
+
+## Command Line Options
+
+```text
+camus-cli [database] [options]
+```
+
+| Option | Description |
+| --- | --- |
+| `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
+| `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
+| `-h`, `--help` | Show help. |
+| `-v`, `--version` | Show version. |
+
+Examples:
+
+```shell
+camus-cli
+camus-cli wcbets
+camus-cli -c "Endpoint=http://localhost:5095;Database=wcbets"
+camus-cli --version
+camus-cli -v
+camus-cli --help
+camus-cli -h
+```
+
+## Interactive Shell
+
+When the terminal supports ANSI rendering, `camus-cli` starts an enhanced interactive editor.
+
+Prompt:
+
+```text
+camus>
+```
+
+Continuation prompt for multiline input:
+
+```text
+   ->
+```
+
+Exit the shell:
+
+```sql
+exit
+```
+
+or:
+
+```sql
+quit
+```
+
+If a transaction is active, the shell requires `commit` or `rollback` before exit.
+
+Clear the screen:
+
+```sql
+clear
+```
+
+Run SQL from a file:
+
+```sql
+source ./schema.sql
+```
+
+## Multiline Input
+
+The shell supports multiline SQL input.
+
+Use `Shift+Enter` to insert a new line manually:
+
+```sql
+select
+  id,
+  name
+from users
+where active = true;
+```
+
+Pasting multiline SQL is also supported. When a pasted statement contains multiple lines, the editor converts pasted `Enter` keys into new lines instead of immediately submitting the SQL.
+
+The shell keeps collecting input when a statement is incomplete. A statement is considered incomplete when it has:
+
+| Incomplete form | Example |
+| --- | --- |
+| Open single quote | `select 'hello` |
+| Open double quote | `select "name` |
+| Open parenthesis | `select concat(` |
+| Trailing comma | `select id,` |
+
+Multiple SQL statements can be submitted together when they are separated by semicolons:
+
+```sql
+insert into users (id, name) values (gen_id(), 'Ada');
+select * from users;
+```
+
+Semicolons inside single or double quoted strings do not split statements.
+
+## Keyboard Shortcuts
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Submit the current statement. |
+| `Shift+Enter` | Insert a new line in multiline mode. |
+| `Up` | Move to the previous line in multiline input, or previous history item from the first line. |
+| `Down` | Move to the next line in multiline input, or next history item from the last line. |
+| `Left` / `Right` | Move the cursor. |
+| `Ctrl+Left` / `Ctrl+Right` | Move by word. |
+| `Home` / `End` | Move to the beginning or end of the current line. |
+| `PageUp` / `PageDown` | Move to the first or last line of multiline input. |
+| `Backspace` / `Delete` | Delete text. |
+
+## History
+
+Executed statements are stored in a JSON history file under the system temporary directory:
+
+```text
+camusdb.history.json
+```
+
+History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once.
+
+Use `Up` and `Down` to navigate history. In multiline input, `Up` and `Down` first move between lines; from the first or last line they navigate history.
+
+## SQL Execution
+
+The shell sends SQL to CamusDB and displays results in a table for query statements. It prints affected row counts for non-query statements and DDL.
+
+Query statements include:
+
+```sql
+select * from users;
+show tables;
+desc users;
+describe users;
+```
+
+DDL statements include:
+
+```sql
+create table users (
+  id object_id primary key,
+  name string not null,
+  active bool default true
+);
+
+create index users_name on users (name);
+alter table users rename column name to full_name;
+drop index users_name;
+drop table users;
+```
+
+Mutation statements include:
+
+```sql
+insert into users (id, name, active)
+values (gen_id(), 'Ada Lovelace', true);
+
+update users
+set active = false
+where name = 'Ada Lovelace';
+
+delete from users
+where active = false;
+```
+
+## Transactions
+
+Start a transaction:
+
+```sql
+begin;
+```
+
+or:
+
+```sql
+start transaction;
+```
+
+Commit:
+
+```sql
+commit;
+```
+
+Rollback:
+
+```sql
+rollback;
+```
+
+Only one active transaction is allowed at a time. If `commit` or `rollback` fails, the shell clears its local transaction state so a new transaction can be started.
+
+## Syntax Coloring
+
+The interactive editor colors SQL keywords, shell commands, constants, numbers, quoted strings, and supported function names.
+
+Colored SQL keywords include:
+
+```text
+select update from where order by asc desc describe database table set create if exists default
+primary key index indexes constraint limit insert into values delete alter rename column drop
+null not string int64 float64 object_id oid bool boolean is on in or and between like ilike add
+show use tables view views columns group join inner offset unique having begin start transaction
+commit rollback as distinct cast integer double
+```
+
+Colored shell commands:
+
+```text
+clear source use exit quit
+```
+
+Colored constants:
+
+```text
+true false
+```
+
+Colored aggregate functions:
+
+```text
+count max min avg sum
+```
+
+Colored scalar functions and aliases:
+
+```text
+gen_id
+current_timestamp now current_date date_add date_diff date_part date_trunc unix_timestamp from_unixtime
+abs ceil ceiling floor sqrt pow power mod sign random round
+length lower upper trim ltrim rtrim substring replace contains starts_with ends_with concat
+json_valid json_type json_extract json_value json_contains json_array_length
+to_string to_int64 to_float64 to_bool to_id str_id
+```
+
+## Function Examples
+
+ID:
+
+```sql
+insert into users (id, name) values (gen_id(), 'Grace Hopper');
+```
+
+Date and time:
+
+```sql
+select current_timestamp(), now(), current_date();
+select date_add(current_timestamp(), 7, 'day');
+select date_diff('2026-01-01T00:00:00Z', current_timestamp(), 'day');
+select date_part('year', current_timestamp());
+select date_trunc('day', current_timestamp());
+select unix_timestamp(), from_unixtime(1767225600);
+```
+
+Math:
+
+```sql
+select abs(-10), ceil(1.2), floor(1.8), round(1.234, 2);
+select sqrt(16), pow(2, 8), mod(10, 3), sign(-42), random();
+```
+
+Strings:
+
+```sql
+select length(name), lower(name), upper(name), trim(name) from users;
+select substring(name, 1, 3), replace(name, 'Ada', 'A.') from users;
+select contains(name, 'Ada'), starts_with(name, 'A'), ends_with(name, 'e') from users;
+select concat(first_name, ' ', last_name) from users;
+```
+
+JSON:
+
+```sql
+select json_valid(payload), json_type(payload) from events;
+select json_extract(payload, '$.user.id'), json_value(payload, '$.user.name') from events;
+select json_contains(payload, '{"active":true}'), json_array_length(payload, '$.items') from events;
+```
+
+Casting:
+
+```sql
+select cast(score as integer) from scores;
+select to_string(score), to_int64(score), to_float64(score), to_bool(active), to_id(id_text) from scores;
+```
+
+## Script Files
+
+Use `source` to execute a file containing one or more SQL statements:
+
+```sql
+source ./seed.sql
+```
+
+Example `seed.sql`:
+
+```sql
+create table users (
+  id object_id primary key,
+  name string not null,
+  active bool default true
+);
+
+insert into users (id, name, active)
+values (gen_id(), 'Ada Lovelace', true);
+
+select * from users;
+```
+
+The shell splits statements on semicolons outside quoted strings.
+
+## Output
+
+Queries are printed as Spectre.Console tables:
+
+```text
++----+------+
+| id | name |
++----+------+
+| 1  | Ada  |
++----+------+
+1 rows in set (00:00:00.0123456)
+```
+
+DDL and non-query statements print affected row counts:
+
+```text
+Query OK, 1 rows affected (00:00:00.0123456)
+```
+
+Errors are printed with the exception type and message.
+
+## Development
+
+Build the CLI:
+
+```shell
+dotnet build CamusDb.SqlSh/CamusDb.SqlSh.csproj
+```
+
+Run the line editor tests:
+
+```shell
+dotnet test Radline/RadLine.Tests/RadLine.Tests.csproj
+```
+
+Create the NuGet package:
+
+```shell
+dotnet pack CamusDb.SqlSh/CamusDb.SqlSh.csproj -c Release
+```
+
+The package is written to:
+
+```text
+CamusDb.SqlSh/nupkg/
+```
+
+Run from source:
+
+```shell
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- wcbets
+```
+
+Run from source with a connection string:
+
+```shell
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- -c "Endpoint=http://localhost:5095;Database=wcbets"
+```
+
+## Troubleshooting
+
+The shell connects to `test` when running `camus-cli wcbets`.
+
+Make sure you are running a version that includes database argument support:
+
+```shell
+camus-cli -v
+```
+
+Then clear caches and update if needed:
+
+```shell
+dotnet nuget locals all --clear
+dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
+```
+
+Connection string validation fails.
+
+Use a connection string with both required fields:
+
+```text
+Endpoint=http://localhost:5095;Database=wcbets
+```
+
+The shell will not exit.
+
+If a transaction is active, run:
+
+```sql
+commit;
+```
+
+or:
+
+```sql
+rollback;
+```
+
+Then run:
+
+```sql
+exit
+```
 
 ## License
 
