@@ -68,6 +68,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "values",
         "delete",
         "alter",
+        "rename",
         "column",
         "drop",
         "null",
@@ -105,16 +106,64 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "transaction",
         "commit",
         "rollback",
-        "as"
+        "as",
+        "distinct",
+        "cast",
+        "integer",
+        "double",
     ];
 
     string[] functions = [
         "count",
-        "distinct",
         "max",
         "min",
         "avg",
-        "sum"
+        "sum",
+        "gen_id",
+        "current_timestamp",
+        "now",
+        "current_date",
+        "date_add",
+        "date_diff",
+        "date_part",
+        "date_trunc",
+        "unix_timestamp",
+        "from_unixtime",
+        "abs",
+        "ceil",
+        "ceiling",
+        "floor",
+        "sqrt",
+        "pow",
+        "power",
+        "mod",
+        "sign",
+        "random",
+        "round",
+        "length",
+        "lower",
+        "upper",
+        "trim",
+        "ltrim",
+        "rtrim",
+        "substring",
+        "replace",
+        "contains",
+        "starts_with",
+        "ends_with",
+        "concat",
+        "json_valid",
+        "json_type",
+        "json_extract",
+        "json_value",
+        "json_contains",
+        "json_array_length",
+        "to_string",
+        "to_int64",
+        "to_float64",
+        "to_bool",
+        "to_id",
+        "str_id",
     ];
 
     string[] commands = [
@@ -250,8 +299,7 @@ while (true)
         if (editor is not null)
             editor.History.Add(executableSql);
 
-        if (history is not null)
-            history.Add(executableSql);
+        AddHistory(history, executableSql);
 
         await ExecuteSql(connection, executableSql);
     }
@@ -401,6 +449,20 @@ static async Task SaveHistory(string historyPath, List<string>? history)
 {
     if (history is not null)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+}
+
+static void AddHistory(List<string>? history, string sql)
+{
+    if (history is null)
+        return;
+
+    if (history.Count > 0 &&
+        string.Equals(history[^1], sql, StringComparison.Ordinal))
+    {
+        return;
+    }
+
+    history.Add(sql);
 }
 
 async Task ExecuteNonQuery(CamusConnection connection, string sql)
@@ -677,8 +739,25 @@ static async Task<List<string>> GetHistory(string historyPath)
     }
 
     history ??= new();
+    history = RemoveAdjacentDuplicates(history);
 
     return history;
+}
+
+static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
+{
+    List<string> result = new();
+
+    foreach (string item in history)
+    {
+        if (result.Count == 0 ||
+            !string.Equals(result[^1], item, StringComparison.Ordinal))
+        {
+            result.Add(item);
+        }
+    }
+
+    return result;
 }
 
 static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)

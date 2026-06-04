@@ -181,5 +181,19 @@ namespace RadLine.Tests
             // Then
             editor.History.Count.ShouldBe(1);
         }
+
+        [Fact]
+        public void Should_Not_Add_Public_History_Text_If_Its_The_Same_As_The_Last_Entry()
+        {
+            // Given
+            var editor = new LineEditor(new TestConsole());
+
+            // When
+            editor.History.Add("select * from robots");
+            editor.History.Add("select * from robots");
+
+            // Then
+            editor.History.Count.ShouldBe(1);
+        }
     }
 }
