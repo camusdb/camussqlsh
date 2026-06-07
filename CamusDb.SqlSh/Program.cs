@@ -45,7 +45,8 @@ string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.
 
 List<string>? history = await GetHistory(historyPath);
 
-CamusConnection connection = await GetConnection(opts);
+string activeConnectionString = BuildConnectionString(opts);
+CamusConnection connection = await ConnectionHelper.OpenAsync(activeConnectionString);
 
 LineEditor? editor = null;
 CamusTransaction? transaction = null;
@@ -205,7 +206,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 
     WordHighlighter worldHighlighter = new();
 
-    Style funcStyle = new(foreground: Color.GreenYellow);
+    Style funcStyle = new(foreground: Color.Lime);
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
     Style constantsStyle = new(foreground: Color.LightPink3);
@@ -296,6 +297,27 @@ while (true)
         if (pendingSql.Length == 0 && sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
         {
             await LoadSource(connection, sqlTrim[7..].Trim());
+            continue;
+        }
+
+        if (pendingSql.Length == 0 && sqlTrim.StartsWith("use ", StringComparison.InvariantCultureIgnoreCase))
+        {
+            string newDb = sqlTrim[4..].Trim().TrimEnd(';');
+            if (string.IsNullOrWhiteSpace(newDb))
+            {
+                AnsiConsole.MarkupLine("[red]Usage: use <database>[/]");
+                continue;
+            }
+
+            if (transaction is not null)
+            {
+                AnsiConsole.MarkupLine("[red]There's an active transaction, please commit or rollback before switching databases[/]");
+                continue;
+            }
+
+            activeConnectionString = SwapDatabase(activeConnectionString, newDb);
+            connection = await ConnectionHelper.OpenAsync(activeConnectionString);
+            AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(newDb));
             continue;
         }
 
@@ -678,15 +700,24 @@ static bool IsDDL(string sql)
            trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
 }
 
-static async Task<CamusConnection> GetConnection(Options opts)
+static string BuildConnectionString(Options opts)
 {
     string database = string.IsNullOrWhiteSpace(opts.Database) ? "test" : opts.Database;
 
-    string connectionString = string.IsNullOrEmpty(opts.ConnectionSource)
+    return string.IsNullOrEmpty(opts.ConnectionSource)
         ? $"Endpoint=http://localhost:5095;Database={database}"
         : opts.ConnectionSource;
+}
 
-    return await ConnectionHelper.OpenAsync(connectionString);
+static string SwapDatabase(string connectionString, string newDatabase)
+{
+    List<string> parts = connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Where(p => !p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    parts.Add($"Database={newDatabase}");
+    return string.Join(';', parts);
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
