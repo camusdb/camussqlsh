@@ -15,12 +15,6 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
-ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(NormalizeBuiltInOptions(args));
-
-Options? opts = optsResult.Value;
-if (opts is null)
-    return;
-
 string? informationalVersion = Assembly.GetExecutingAssembly()
     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
     ?.InformationalVersion;
@@ -28,6 +22,24 @@ string version = informationalVersion?.Split('+')[0]
     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
     ?? "unknown";
 Console.WriteLine($"CamusDB SQL Shell {version} (alpha)\n");
+
+if (args.Length > 0 && string.Equals(args[0], "workload", StringComparison.OrdinalIgnoreCase))
+{
+    await WorkloadCommand.RunAsync(args[1..]);
+    return;
+}
+
+if (args.Length > 0 && (args[0] == "--help" || args[0] == "-h"))
+{
+    PrintHelp();
+    return;
+}
+
+ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(NormalizeBuiltInOptions(args));
+
+Options? opts = optsResult.Value;
+if (opts is null)
+    return;
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -101,6 +113,8 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "offset",
         "unique",
         "having",
+        "explain",
+        "analyze",
         "begin",
         "start",
         "transaction",
@@ -172,6 +186,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "use",
         "exit",
         "quit",
+        "workload",
+        "init",
+        "run",
     ];
 
     string[] constants = [
@@ -188,7 +205,7 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
 
     WordHighlighter worldHighlighter = new();
 
-    Style funcStyle = new(foreground: Color.Aqua);
+    Style funcStyle = new(foreground: Color.GreenYellow);
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
     Style constantsStyle = new(foreground: Color.LightPink3);
@@ -644,6 +661,7 @@ static bool IsQueryable(string sql)
     string trimmedSql = sql.Trim();
 
     return trimmedSql.StartsWith("select ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("explain ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("desc ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
@@ -662,63 +680,13 @@ static bool IsDDL(string sql)
 
 static async Task<CamusConnection> GetConnection(Options opts)
 {
-    CamusConnection cmConnection;
+    string database = string.IsNullOrWhiteSpace(opts.Database) ? "test" : opts.Database;
 
-    SessionPoolOptions options = new()
-    {
-        MinimumPooledSessions = 1,
-        MaximumActiveSessions = 20,
-    };
+    string connectionString = string.IsNullOrEmpty(opts.ConnectionSource)
+        ? $"Endpoint=http://localhost:5095;Database={database}"
+        : opts.ConnectionSource;
 
-    string? connectionString = opts.ConnectionSource;
-    string database = string.IsNullOrWhiteSpace(opts.Database)
-        ? "test"
-        : opts.Database;
-
-    if (string.IsNullOrEmpty(connectionString))
-        connectionString = $"Endpoint=https://localhost:7141;Database={database}";
-
-    ValidateConnectionString(connectionString);
-
-    SessionPoolManager manager = SessionPoolManager.Create(options);
-
-    CamusConnectionStringBuilder builder = new(connectionString)
-    {
-        SessionPoolManager = manager
-    };
-
-    cmConnection = new(builder);
-
-    await cmConnection.OpenAsync();
-
-    CamusPingCommand pingCommand = cmConnection.CreatePingCommand();
-
-    await pingCommand.ExecuteNonQueryAsync();
-
-    return cmConnection;
-}
-
-static void ValidateConnectionString(string connectionString)
-{
-    Dictionary<string, string> values = connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Select(part => part.Split('=', 2, StringSplitOptions.TrimEntries))
-        .Where(parts => parts.Length == 2)
-        .GroupBy(parts => parts[0], StringComparer.InvariantCultureIgnoreCase)
-        .ToDictionary(group => group.Key, group => group.Last()[1], StringComparer.InvariantCultureIgnoreCase);
-
-    if (!values.TryGetValue("Endpoint", out string? endpoint) ||
-        string.IsNullOrWhiteSpace(endpoint) ||
-        !Uri.TryCreate(endpoint, UriKind.Absolute, out _))
-    {
-        throw new ArgumentException("Connection string must include a valid Endpoint. Example: Endpoint=http://localhost:5095;Database=wcbets");
-    }
-
-    if (!values.TryGetValue("Database", out string? database) ||
-        string.IsNullOrWhiteSpace(database))
-    {
-        throw new ArgumentException("Connection string must include Database. Example: Endpoint=http://localhost:5095;Database=wcbets");
-    }
+    return await ConnectionHelper.OpenAsync(connectionString);
 }
 
 static async Task<List<string>> GetHistory(string historyPath)
@@ -758,6 +726,35 @@ static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
     }
 
     return result;
+}
+
+static void PrintHelp()
+{
+    AnsiConsole.MarkupLine("Usage: camus-cli [[database]] [[options]]");
+    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind> [[options]]");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Options:[/]");
+    AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
+    AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: Endpoint=http://localhost:5095;Database=test)");
+    AnsiConsole.MarkupLine("  -h, --help                    Show this help message");
+    AnsiConsole.MarkupLine("  -v, --version                 Show version information");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
+    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind>  Create schema and seed data for a workload");
+    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind>  Run a continuous workload against the database");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Workload options:[/]");
+    AnsiConsole.MarkupLine("  -c, --connection-source       Connection string");
+    AnsiConsole.MarkupLine("  --database                    Target database name (default: demo)");
+    AnsiConsole.MarkupLine("  --rows N                      Rows to generate for init (default: 1000, bank only)");
+    AnsiConsole.MarkupLine("  --concurrency N               Parallel workers for run (default: 3)");
+    AnsiConsole.MarkupLine("  --duration N                  Run duration in seconds (default: 60)");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Examples:[/]");
+    AnsiConsole.MarkupLine("  camus-cli mydb");
+    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb\"");
+    AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
+    AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
 }
 
 static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)

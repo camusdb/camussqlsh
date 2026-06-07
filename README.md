@@ -40,7 +40,7 @@ dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
 Start the shell with the default connection:
 
 ```shell
-camus-cli
+$ camus-cli
 ```
 
 By default, the shell connects to:
@@ -52,19 +52,19 @@ Endpoint=https://localhost:7141;Database=test
 Open a specific database using the positional database argument:
 
 ```shell
-camus-cli wcbets
+$ camus-cli northwind
 ```
 
 This connects to:
 
 ```text
-Endpoint=https://localhost:7141;Database=wcbets
+Endpoint=https://localhost:7141;Database=northwind
 ```
 
 Open a custom endpoint and database with a connection string:
 
 ```shell
-camus-cli -c "Endpoint=http://localhost:5095;Database=wcbets"
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
 ```
 
 The connection string must include both `Endpoint` and `Database`.
@@ -85,13 +85,13 @@ camus-cli [database] [options]
 Examples:
 
 ```shell
-camus-cli
-camus-cli wcbets
-camus-cli -c "Endpoint=http://localhost:5095;Database=wcbets"
-camus-cli --version
-camus-cli -v
-camus-cli --help
-camus-cli -h
+$ camus-cli
+$ camus-cli northwind
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
+$ camus-cli --version
+$ camus-cli -v
+$ camus-cli --help
+$ camus-cli -h
 ```
 
 ## Interactive Shell
@@ -204,6 +204,10 @@ Query statements include:
 
 ```sql
 select * from users;
+explain select * from users;
+explain (logical) select * from users;
+explain (physical) select * from users;
+explain (analyze) select * from users;
 show tables;
 desc users;
 describe users;
@@ -276,8 +280,8 @@ Colored SQL keywords include:
 select update from where order by asc desc describe database table set create if exists default
 primary key index indexes constraint limit insert into values delete alter rename column drop
 null not string int64 float64 object_id oid bool boolean is on in or and between like ilike add
-show use tables view views columns group join inner offset unique having begin start transaction
-commit rollback as distinct cast integer double
+show use tables view views columns group join inner offset unique having explain analyze begin
+start transaction commit rollback as distinct cast integer double
 ```
 
 Colored shell commands:
@@ -434,18 +438,18 @@ CamusDb.SqlSh/nupkg/
 Run from source:
 
 ```shell
-dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- wcbets
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- northwind
 ```
 
 Run from source with a connection string:
 
 ```shell
-dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- -c "Endpoint=http://localhost:5095;Database=wcbets"
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- -c "Endpoint=http://localhost:5095;Database=northwind"
 ```
 
 ## Troubleshooting
 
-The shell connects to `test` when running `camus-cli wcbets`.
+The shell connects to `test` when running `camus-cli northwind`.
 
 Make sure you are running a version that includes database argument support:
 
@@ -465,7 +469,7 @@ Connection string validation fails.
 Use a connection string with both required fields:
 
 ```text
-Endpoint=http://localhost:5095;Database=wcbets
+Endpoint=http://localhost:5095;Database=northwind
 ```
 
 The shell will not exit.
