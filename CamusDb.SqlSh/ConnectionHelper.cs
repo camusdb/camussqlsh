@@ -33,6 +33,26 @@ internal static class ConnectionHelper
         }
     }
 
+    internal static Dictionary<string, ColumnValue> ReadCurrentRow(CamusDataReader reader)
+    {
+        Dictionary<string, ColumnValue> row = new(reader.FieldCount);
+        for (int i = 0; i < reader.FieldCount; i++)
+        {
+            ColumnValue cv = reader.IsDBNull(i)
+                ? new ColumnValue { Type = ColumnType.Null }
+                : reader.GetDataTypeName(i) switch
+                {
+                    "Id" => new ColumnValue { Type = ColumnType.Id, StrValue = reader.GetString(i) },
+                    "Integer64" => new ColumnValue { Type = ColumnType.Integer64, LongValue = reader.GetInt64(i) },
+                    "Bool" => new ColumnValue { Type = ColumnType.Bool, BoolValue = reader.GetBoolean(i) },
+                    "Float64" => new ColumnValue { Type = ColumnType.Float64, FloatValue = (float)reader.GetDouble(i) },
+                    _ => new ColumnValue { Type = ColumnType.String, StrValue = reader.GetString(i) }
+                };
+            row[reader.GetName(i)] = cv;
+        }
+        return row;
+    }
+
     internal static async Task<CamusConnection> OpenAsync(string connectionString)
     {
         Validate(connectionString);

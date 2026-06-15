@@ -28,10 +28,10 @@ internal static class WorkloadCommand
             return;
         }
 
-        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind")
+        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind" && wa.WorkloadName != "factory")
         {
             AnsiConsole.MarkupLine("[red]Unknown workload:[/] {0}", Markup.Escape(wa.WorkloadName.Length > 0 ? wa.WorkloadName : "(none)"));
-            AnsiConsole.MarkupLine("Available workloads: bank, northwind");
+            AnsiConsole.MarkupLine("Available workloads: bank, northwind, factory");
             return;
         }
 
@@ -64,6 +64,12 @@ internal static class WorkloadCommand
                     await NorthwindWorkload.InitAsync(conn);
                 else
                     await NorthwindWorkload.RunAsync(conn, wa.Concurrency, wa.Duration);
+                break;
+            case "factory":
+                if (wa.Command == "init")
+                    await FactoryWorkload.InitAsync(conn);
+                else
+                    await FactoryWorkload.RunAsync(conn, wa.Concurrency, wa.Duration);
                 break;
         }
     }

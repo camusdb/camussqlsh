@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <IsPackable>true</IsPackable>
     <NoWarn>$(NoWarn);NU5104;SA1503;SA1316;SA1512;SA1005;SA1028</NoWarn>

@@ -51,7 +51,7 @@ internal static class BankWorkload
             CamusDataReader reader = await countCmd.ExecuteReaderAsync();
             if (await reader.ReadAsync())
             {
-                Dictionary<string, ColumnValue> row = reader.GetCurrent();
+                Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
                 if (row.TryGetValue("cnt", out ColumnValue? val) && val is not null)
                     accountCount = val.LongValue;
             }

@@ -23,9 +23,13 @@ string version = informationalVersion?.Split('+')[0]
     ?? "unknown";
 Console.WriteLine($"CamusDB SQL Shell {version} (alpha)\n");
 
-if (args.Length > 0 && string.Equals(args[0], "workload", StringComparison.OrdinalIgnoreCase))
+int workloadIdx = Array.FindIndex(args, a => string.Equals(a, "workload", StringComparison.OrdinalIgnoreCase));
+if (workloadIdx >= 0)
 {
-    await WorkloadCommand.RunAsync(args[1..]);
+    // Collect flags that appeared before "workload" and append them after
+    string[] beforeWorkload = args[..workloadIdx];
+    string[] afterWorkload = args[(workloadIdx + 1)..];
+    await WorkloadCommand.RunAsync([.. afterWorkload, .. beforeWorkload]);
     return;
 }
 
@@ -352,7 +356,7 @@ async Task LoadSource(CamusConnection connection, string paths)
 {
     if (!File.Exists(paths))
     {
-        AnsiConsole.Markup("[red]File not found: {0}[/]", Markup.Escape(paths));
+        AnsiConsole.MarkupLine("[red]File not found: {0}[/]\n", Markup.Escape(paths));
         return;
     }
 
@@ -598,7 +602,7 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
 
     while (await reader.ReadAsync())
     {
-        Dictionary<string, ColumnValue> current = reader.GetCurrent();
+        Dictionary<string, ColumnValue> current = ConnectionHelper.ReadCurrentRow(reader);
 
         if (table is null)
         {
@@ -762,7 +766,7 @@ static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
 static void PrintHelp()
 {
     AnsiConsole.MarkupLine("Usage: camus-cli [[database]] [[options]]");
-    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind> [[options]]");
+    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory> [[options]]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
@@ -771,8 +775,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -v, --version                 Show version information");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
-    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind>  Create schema and seed data for a workload");
-    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind>  Run a continuous workload against the database");
+    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory>  Create schema and seed data for a workload");
+    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind|factory>  Run a continuous workload against the database");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Workload options:[/]");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string");
@@ -786,6 +790,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb\"");
     AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
     AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
+    AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
 }
 
 static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
