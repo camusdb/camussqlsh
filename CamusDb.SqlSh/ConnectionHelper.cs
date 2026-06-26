@@ -23,13 +23,7 @@ internal static class ConnectionHelper
             string.IsNullOrWhiteSpace(endpoint) ||
             !Uri.TryCreate(endpoint, UriKind.Absolute, out _))
         {
-            throw new ArgumentException("Connection string must include a valid Endpoint. Example: Endpoint=http://localhost:5095;Database=mydb");
-        }
-
-        if (!values.TryGetValue("Database", out string? database) ||
-            string.IsNullOrWhiteSpace(database))
-        {
-            throw new ArgumentException("Connection string must include Database. Example: Endpoint=http://localhost:5095;Database=mydb");
+            throw new ArgumentException("Connection string must include a valid Endpoint. Example: Endpoint=http://localhost:5095");
         }
     }
 

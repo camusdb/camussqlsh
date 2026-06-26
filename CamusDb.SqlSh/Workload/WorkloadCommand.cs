@@ -18,7 +18,7 @@ internal static class WorkloadCommand
         if (wa.Command != "init" && wa.Command != "run")
         {
             AnsiConsole.MarkupLine("[red]Unknown workload command:[/] {0}", Markup.Escape(wa.Command.Length > 0 ? wa.Command : "(none)"));
-            AnsiConsole.MarkupLine("Usage: camus-cli workload <init|run> <bank|northwind> [options]");
+            AnsiConsole.MarkupLine("Usage: camus-cli workload <init|run> <bank|northwind|factory|tpcc> [[options]]");
             AnsiConsole.MarkupLine("Options:");
             AnsiConsole.MarkupLine("  -c, --connection-source  Connection string (default: Endpoint=http://localhost:5095;Database=demo)");
             AnsiConsole.MarkupLine("  --database               Target database name (default: demo)");
@@ -28,10 +28,10 @@ internal static class WorkloadCommand
             return;
         }
 
-        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind" && wa.WorkloadName != "factory")
+        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind" && wa.WorkloadName != "factory" && wa.WorkloadName != "tpcc")
         {
             AnsiConsole.MarkupLine("[red]Unknown workload:[/] {0}", Markup.Escape(wa.WorkloadName.Length > 0 ? wa.WorkloadName : "(none)"));
-            AnsiConsole.MarkupLine("Available workloads: bank, northwind, factory");
+            AnsiConsole.MarkupLine("Available workloads: bank, northwind, factory, tpcc");
             return;
         }
 
@@ -70,6 +70,12 @@ internal static class WorkloadCommand
                     await FactoryWorkload.InitAsync(conn);
                 else
                     await FactoryWorkload.RunAsync(conn, wa.Concurrency, wa.Duration);
+                break;
+            case "tpcc":
+                if (wa.Command == "init")
+                    await TpccWorkload.InitAsync(conn, wa.Rows);
+                else
+                    await TpccWorkload.RunAsync(conn, wa.Concurrency, wa.Duration);
                 break;
         }
     }

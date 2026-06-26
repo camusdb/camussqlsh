@@ -25,5 +25,17 @@ internal static class WorkloadHelpers
         await cmd.ExecuteNonQueryAsync();
     }
 
+    internal static async Task ExecWithParams(CamusConnection conn, string sql,
+        (string name, ColumnType type, object value)[] parameters,
+        CamusTransaction? tx = null)
+    {
+        using CamusCommand cmd = conn.CreateCamusCommand(sql);
+        cmd.CommandTimeout = 60;
+        cmd.Transaction = tx;
+        foreach (var (name, type, value) in parameters)
+            cmd.Parameters.Add(name, type, value);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
     internal static string Esc(string s) => s.Replace("'", "''");
 }

@@ -12,6 +12,8 @@ using System.Diagnostics;
 
 internal static class BankWorkload
 {
+    private const int BatchSize = 10;
+
     internal static async Task InitAsync(CamusConnection conn, int rows)
     {
         AnsiConsole.MarkupLine("[cyan]Creating bank schema...[/]");
@@ -30,11 +32,24 @@ internal static class BankWorkload
             {
                 ProgressTask task = ctx.AddTask("[green]accounts[/]", maxValue: rows);
 
+                // accounts — batch BatchSize at a time
+                var batch = new List<string>(BatchSize);
                 for (int i = 1; i <= rows; i++)
                 {
                     long balance = rng.NextInt64(10_000L, 1_000_000L); // $100–$10,000 in cents
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO accounts (id, balance) VALUES ({i}, {balance})");
+                    batch.Add($"INSERT INTO accounts (id, balance) VALUES ({i}, {balance})");
                     task.Increment(1);
+
+                    if (batch.Count >= BatchSize)
+                    {
+                        await RunBatch(conn, batch);
+                        batch.Clear();
+                    }
+                }
+                if (batch.Count > 0)
+                {
+                    await RunBatch(conn, batch);
+                    batch.Clear();
                 }
             });
 
@@ -132,5 +147,21 @@ internal static class BankWorkload
         double elapsed = sw.Elapsed.TotalSeconds;
         AnsiConsole.MarkupLine("\n[green]Done:[/] {0} ops in {1:F1}s ({2:F1} ops/sec), {3} errors",
             totalOps, elapsed, elapsed > 0 ? totalOps / elapsed : 0, totalErrors);
+    }
+
+    private static async Task RunBatch(CamusConnection conn, List<string> batch)
+    {
+        CamusTransaction tx = await conn.BeginTransactionAsync();
+        try
+        {
+            foreach (string sql in batch)
+                await WorkloadHelpers.Exec(conn, sql, tx);
+            await tx.CommitAsync();
+        }
+        catch
+        {
+            try { await tx.RollbackAsync(); } catch { }
+            throw;
+        }
     }
 }

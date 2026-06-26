@@ -16,25 +16,6 @@ Update an existing installation:
 dotnet tool update --global CamusDB.SqlSh
 ```
 
-Install a local package generated from this repository:
-
-```shell
-dotnet tool install --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
-```
-
-Update from a local package:
-
-```shell
-dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
-```
-
-If the .NET tool cache keeps showing an older version, clear the NuGet caches and update again:
-
-```shell
-dotnet nuget locals all --clear
-dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
-```
-
 ## Basic Usage
 
 Start the shell with the default connection:
@@ -46,7 +27,7 @@ $ camus-cli
 By default, the shell connects to:
 
 ```text
-Endpoint=https://localhost:7141;Database=test
+Endpoint=https://localhost:5095;Database=test
 ```
 
 Open a specific database using the positional database argument:
@@ -58,7 +39,7 @@ $ camus-cli northwind
 This connects to:
 
 ```text
-Endpoint=https://localhost:7141;Database=northwind
+Endpoint=https://localhost:5095;Database=northwind
 ```
 
 Open a custom endpoint and database with a connection string:

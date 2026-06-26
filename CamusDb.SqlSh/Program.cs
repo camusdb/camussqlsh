@@ -91,12 +91,23 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "null",
         "not",
         "string",
+        "char",
+        "varchar",
+        "int",
         "int64",
+        "float32",
         "float64",
+        "real",
         "object_id",
         "oid",
         "bool",
         "boolean",
+        "bytes",
+        "blob",
+        "date",
+        "datetime",
+        "timestamp",
+        "array",
         "is",
         "on",
         "in",
@@ -130,6 +141,17 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "cast",
         "integer",
         "double",
+        "float",
+        "databases",
+        "to",
+        "at",
+        "isolation",
+        "level",
+        "read",
+        "committed",
+        "serializable",
+        "only",
+        "write",
     ];
 
     string[] functions = [
@@ -348,7 +370,18 @@ while (true)
     }
     catch (Exception ex)
     {
-        AnsiConsole.MarkupLine("[red]{0}[/]: {1}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(ex.Message));
+        string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
+        AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
+
+        // A failed statement aborts the transaction server-side, so the local handle is
+        // now stale: any further command (including rollback) would fail with "Unknown
+        // transaction". Discard it so the shell returns to a consistent, autocommit state.
+        if (transaction is not null)
+        {
+            transaction = null;
+            pendingSql.Clear();
+            AnsiConsole.MarkupLine("[yellow]The active transaction was aborted and has been rolled back.[/]\n");
+        }
     }
 }
 
@@ -384,8 +417,27 @@ async Task ExecuteSql(CamusConnection connection, string input)
         if (string.IsNullOrWhiteSpace(sql))
             continue;
 
-        if (IsQueryable(sql))
+        bool needsDb = !IsDatabaseDDL(sql) && !IsSystemLevelQuery(sql);
+        if (needsDb && !HasDatabase(activeConnectionString))
+        {
+            AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
+            continue;
+        }
+
+        if (IsSystemLevelQuery(sql))
+        {
+            string sysCs = GetEndpointConnectionString(activeConnectionString);
+            CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
+            await ExecuteQuery(sysConn, sql);
+        }
+        else if (IsQueryable(sql))
             await ExecuteQuery(connection, sql);
+        else if (IsDatabaseDDL(sql))
+        {
+            string sysCs = GetEndpointConnectionString(activeConnectionString);
+            CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
+            await ExecuteDDL(sysConn, sql);
+        }
         else if (IsDDL(sql))
             await ExecuteDDL(connection, sql);
         else if (IsBeginTx(sql))
@@ -693,11 +745,39 @@ static bool IsQueryable(string sql)
            trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
 }
 
+static bool HasDatabase(string connectionString)
+{
+    return connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
+        .Where(p => p.Length == 2 && string.Equals(p[0], "Database", StringComparison.OrdinalIgnoreCase))
+        .Any(p => !string.IsNullOrWhiteSpace(p[1]));
+}
+
+static bool IsSystemLevelQuery(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("show databases", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static bool IsDatabaseDDL(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase);
+}
+
 static bool IsDDL(string sql)
 {
     string trimmedSql = sql.Trim();
 
-    return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
+    return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
@@ -706,11 +786,29 @@ static bool IsDDL(string sql)
 
 static string BuildConnectionString(Options opts)
 {
-    string database = string.IsNullOrWhiteSpace(opts.Database) ? "test" : opts.Database;
+    if (!string.IsNullOrEmpty(opts.ConnectionSource))
+    {
+        string cs = opts.ConnectionSource;
+        bool hasDatabase = cs.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Any(p => p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase));
+        return hasDatabase ? cs : cs.TrimEnd(';') + ";Database=";
+    }
 
-    return string.IsNullOrEmpty(opts.ConnectionSource)
-        ? $"Endpoint=http://localhost:5095;Database={database}"
-        : opts.ConnectionSource;
+    return string.IsNullOrWhiteSpace(opts.Database)
+        ? "Endpoint=http://localhost:5095;Database="
+        : $"Endpoint=http://localhost:5095;Database={opts.Database}";
+}
+
+static string GetEndpointConnectionString(string connectionString)
+{
+    string? endpoint = connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
+        .Where(p => p.Length == 2 && string.Equals(p[0], "Endpoint", StringComparison.OrdinalIgnoreCase))
+        .Select(p => p[1])
+        .FirstOrDefault();
+
+    return $"Endpoint={endpoint ?? "http://localhost:5095"};Database=";
 }
 
 static string SwapDatabase(string connectionString, string newDatabase)
@@ -766,7 +864,7 @@ static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
 static void PrintHelp()
 {
     AnsiConsole.MarkupLine("Usage: camus-cli [[database]] [[options]]");
-    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory> [[options]]");
+    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory|tpcc> [[options]]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
@@ -775,8 +873,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -v, --version                 Show version information");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
-    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory>  Create schema and seed data for a workload");
-    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind|factory>  Run a continuous workload against the database");
+    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory|tpcc>  Create schema and seed data for a workload");
+    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind|factory|tpcc>  Run a continuous workload against the database");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Workload options:[/]");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string");
@@ -792,6 +890,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
     AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init tpcc --database tpcc --rows 1");
+    AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
 }
 
 static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
