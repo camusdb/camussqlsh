@@ -1,6 +1,6 @@
 # CamusDB SQL Shell
 
-`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, transactions, and script execution.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution.
 
 ## Installation
 
@@ -60,8 +60,16 @@ camus-cli [database] [options]
 | --- | --- |
 | `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
 | `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
+| `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
+| `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
 | `-h`, `--help` | Show help. |
 | `-v`, `--version` | Show version. |
+
+Environment variables:
+
+| Variable | Description |
+| --- | --- |
+| `CAMUS_FORCE_RICH` | Set to `1`, `true`, or `yes` to force the rich line editor (same as `--force-rich`). |
 
 Examples:
 
@@ -164,6 +172,8 @@ Semicolons inside single or double quoted strings do not split statements.
 | `Home` / `End` | Move to the beginning or end of the current line. |
 | `PageUp` / `PageDown` | Move to the first or last line of multiline input. |
 | `Backspace` / `Delete` | Delete text. |
+| `Tab` | Autocomplete the current word (see [Autocompletion](#autocompletion)). |
+| `Ctrl+Tab` | Cycle to the previous completion. |
 
 ## History
 
@@ -294,6 +304,25 @@ json_valid json_type json_extract json_value json_contains json_array_length
 to_string to_int64 to_float64 to_bool to_id str_id
 ```
 
+## Autocompletion
+
+Press `Tab` to autocomplete the word under the cursor; press it again to cycle through
+matches, and `Ctrl+Tab` to cycle backwards.
+
+Completion is context-aware. When the word being typed follows a keyword that expects a
+table name — `from`, `into`, `update`, `join`, `table`, `desc`, or `describe` — the shell
+suggests the **table names** of the current database. In any other position it suggests the
+SQL keywords, functions, and shell commands.
+
+```sql
+select * from us⇥      -- completes to a table such as "users"
+insert into ⇥          -- cycles through all table names
+sel⇥                   -- completes to "select"
+```
+
+Table names are loaded from `show tables` and refreshed automatically on startup, after a
+`use <database>` switch, and after a `create table` or `drop table` statement.
+
 ## Function Examples
 
 ID:
@@ -390,6 +419,25 @@ Query OK, 1 rows affected (00:00:00.0123456)
 
 Errors are printed with the exception type and message.
 
+### Vertical Output (`\G`)
+
+Terminate a statement with `\G` instead of `;` to print each row vertically, one column per
+line. This is useful for wide rows or rows with long values.
+
+```sql
+select * from users\G
+```
+
+```text
+*************************** 1. row ***************************
+  id: 1
+name: Ada
+2 rows in set (00:00:00.0123456)
+```
+
+`\G` works anywhere `;` does, including inside `source` script files and in multi-statement
+batches (`select 1; select 2\G`).
+
 ## Development
 
 Build the CLI:
@@ -471,6 +519,45 @@ Then run:
 
 ```sql
 exit
+```
+
+### Terminal Detection
+
+The rich editor (colors, multiline, Tab completion) is only enabled when the terminal
+reports that it supports ANSI, is interactive, and writes to a real terminal. These
+capabilities are detected from the environment — chiefly the `TERM` variable — so some
+capable terminals whose `TERM` value is not on Spectre.Console's recognized list (for
+example Rio, which sets `TERM=rio`) fall back to a plain prompt with none of those features.
+
+Print the detected capabilities to see why:
+
+```shell
+camus-cli --diagnose-terminal
+```
+
+```text
+Rich editor disabled (falling back to plain prompt). Terminal capabilities:
+  IsTerminal  : True
+  Ansi        : False
+  Interactive : False
+  TERM        : rio
+  NO_COLOR    : (unset)
+  ForceRich   : False
+```
+
+If the terminal really does support ANSI, force the rich editor:
+
+```shell
+camus-cli --force-rich
+# or, persistently:
+export CAMUS_FORCE_RICH=1
+```
+
+Alternatively, set a `TERM` value that is recognized (this also helps other terminal
+applications):
+
+```shell
+TERM=xterm-256color camus-cli
 ```
 
 ## License

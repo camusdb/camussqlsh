@@ -39,11 +39,53 @@ if (args.Length > 0 && (args[0] == "--help" || args[0] == "-h"))
     return;
 }
 
+// Consumed here so CommandLineParser doesn't reject them as unknown options.
+bool diagnoseTerminal = ConsumeFlag(ref args, "--diagnose-terminal");
+bool forceRich = ConsumeFlag(ref args, "--force-rich")
+    || IsTruthy(Environment.GetEnvironmentVariable("CAMUS_FORCE_RICH"));
+
+// Some capable terminals (e.g. Rio) advertise a TERM value that Spectre.Console's ANSI
+// detector doesn't recognize, so it disables the rich editor even though the terminal
+// handles ANSI fine. Forcing the capabilities lets the whole app render richly.
+if (forceRich)
+{
+    AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings
+    {
+        Ansi = AnsiSupport.Yes,
+        Interactive = InteractionSupport.Yes,
+        ColorSystem = ColorSystemSupport.Detect,
+    });
+}
+
 ParserResult<Options> optsResult = Parser.Default.ParseArguments<Options>(NormalizeBuiltInOptions(args));
 
 Options? opts = optsResult.Value;
 if (opts is null)
     return;
+
+if (diagnoseTerminal)
+{
+    Capabilities caps = AnsiConsole.Console.Profile.Capabilities;
+    bool supported = LineEditor.IsSupported(AnsiConsole.Console);
+    AnsiConsole.MarkupLine(supported
+        ? "[green]Rich editor supported.[/] Terminal capabilities:"
+        : "[yellow]Rich editor disabled[/] (falling back to plain prompt). Terminal capabilities:");
+    AnsiConsole.MarkupLine("  IsTerminal  : {0}", AnsiConsole.Console.Profile.Out.IsTerminal);
+    AnsiConsole.MarkupLine("  Ansi        : {0}", caps.Ansi);
+    AnsiConsole.MarkupLine("  Interactive : {0}", caps.Interactive);
+    AnsiConsole.MarkupLine("  TERM        : {0}", Markup.Escape(Environment.GetEnvironmentVariable("TERM") ?? "(unset)"));
+    AnsiConsole.MarkupLine("  NO_COLOR    : {0}", Markup.Escape(Environment.GetEnvironmentVariable("NO_COLOR") ?? "(unset)"));
+    AnsiConsole.MarkupLine("  ForceRich   : {0}", forceRich);
+
+    if (!supported)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine("[grey]If your terminal supports ANSI (e.g. Rio), force it with[/] [cyan]--force-rich[/] [grey]or[/] [cyan]CAMUS_FORCE_RICH=1[/][grey],[/]");
+        AnsiConsole.MarkupLine("[grey]or set[/] [cyan]TERM=xterm-256color[/][grey].[/]");
+    }
+
+    return;
+}
 
 string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
 
@@ -54,8 +96,11 @@ CamusConnection connection = await ConnectionHelper.OpenAsync(activeConnectionSt
 
 LineEditor? editor = null;
 CamusTransaction? transaction = null;
+SqlCompletion? sqlCompletion = null;
 
-if (LineEditor.IsSupported(AnsiConsole.Console))
+bool richEditorSupported = LineEditor.IsSupported(AnsiConsole.Console);
+
+if (richEditorSupported)
 {
     string[] keywords = [
         "select",
@@ -145,6 +190,9 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
         "databases",
         "to",
         "at",
+        "branch",
+        "branches",
+        "ancestors",
         "isolation",
         "level",
         "read",
@@ -252,12 +300,14 @@ if (LineEditor.IsSupported(AnsiConsole.Console))
     foreach (string regex in regexes)
         worldHighlighter.AddRegex(regex, constantsStyle);
 
+    sqlCompletion = new SqlCompletion([.. keywords, .. functions, .. commands, .. constants]);
+
     editor = new()
     {
         MultiLine = true,
         Text = "",
         Prompt = new MyLineNumberPrompt(new Style(foreground: Color.PaleTurquoise1)),
-        //Completion = new TestCompletion(),        
+        Completion = sqlCompletion,
         Highlighter = worldHighlighter
     };
 
@@ -281,6 +331,9 @@ Console.CancelKeyPress += delegate
     
     SaveHistory(historyPath, history).Wait();
 };
+
+if (sqlCompletion is not null && HasDatabase(activeConnectionString))
+    await sqlCompletion.RefreshTablesAsync(connection);
 
 StringBuilder pendingSql = new();
 
@@ -343,6 +396,10 @@ while (true)
 
             activeConnectionString = SwapDatabase(activeConnectionString, newDb);
             connection = await ConnectionHelper.OpenAsync(activeConnectionString);
+
+            if (sqlCompletion is not null)
+                await sqlCompletion.RefreshTablesAsync(connection);
+
             AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(newDb));
             continue;
         }
@@ -367,6 +424,9 @@ while (true)
         AddHistory(history, executableSql);
 
         await ExecuteSql(connection, executableSql);
+
+        if (sqlCompletion is not null && ChangesTableSet(executableSql) && HasDatabase(activeConnectionString))
+            await sqlCompletion.RefreshTablesAsync(connection);
     }
     catch (Exception ex)
     {
@@ -396,7 +456,7 @@ async Task LoadSource(CamusConnection connection, string paths)
     int numberLine = 0;
     string fileContents = await File.ReadAllTextAsync(paths);
 
-    foreach (string sql in EscapeStringIntoLines(fileContents))
+    foreach ((string sql, bool vertical) in EscapeStringIntoLines(fileContents))
     {
         if (string.IsNullOrEmpty(sql))
         {
@@ -404,7 +464,7 @@ async Task LoadSource(CamusConnection connection, string paths)
             continue;
         }
 
-        await ExecuteSql(connection, sql);
+        await ExecuteSql(connection, vertical ? sql + "\\G" : sql);
 
         numberLine++;
     }
@@ -412,7 +472,7 @@ async Task LoadSource(CamusConnection connection, string paths)
 
 async Task ExecuteSql(CamusConnection connection, string input)
 {
-    foreach (string sql in EscapeStringIntoLines(input))
+    foreach ((string sql, bool vertical) in EscapeStringIntoLines(input))
     {
         if (string.IsNullOrWhiteSpace(sql))
             continue;
@@ -428,10 +488,10 @@ async Task ExecuteSql(CamusConnection connection, string input)
         {
             string sysCs = GetEndpointConnectionString(activeConnectionString);
             CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
-            await ExecuteQuery(sysConn, sql);
+            await ExecuteQuery(sysConn, sql, vertical);
         }
         else if (IsQueryable(sql))
-            await ExecuteQuery(connection, sql);
+            await ExecuteQuery(connection, sql, vertical);
         else if (IsDatabaseDDL(sql))
         {
             string sysCs = GetEndpointConnectionString(activeConnectionString);
@@ -451,7 +511,7 @@ async Task ExecuteSql(CamusConnection connection, string input)
     }
 }
 
-static IEnumerable<string> EscapeStringIntoLines(string input)
+static IEnumerable<(string Sql, bool Vertical)> EscapeStringIntoLines(string input)
 {
     StringBuilder currentLine = new();
     bool inSingleQuote = false, inDoubleQuote = false;
@@ -468,6 +528,15 @@ static IEnumerable<string> EscapeStringIntoLines(string input)
             continue;
         }
 
+        // MySQL-style \G terminator: ends the statement and requests vertical output.
+        if (c == '\\' && i + 1 < input.Length && input[i + 1] == 'G' && !inSingleQuote && !inDoubleQuote)
+        {
+            i++; // skip the 'G'
+            yield return (currentLine.ToString().Trim(), true);
+            currentLine.Clear();
+            continue;
+        }
+
         if (c == '\'' && !inDoubleQuote)
         {
             inSingleQuote = !inSingleQuote;
@@ -479,7 +548,7 @@ static IEnumerable<string> EscapeStringIntoLines(string input)
 
         if (c == ';' && !inSingleQuote && !inDoubleQuote)
         {
-            yield return currentLine.ToString().Trim();
+            yield return (currentLine.ToString().Trim(), false);
             currentLine.Clear();
         }
         else
@@ -489,7 +558,7 @@ static IEnumerable<string> EscapeStringIntoLines(string input)
     }
 
     if (currentLine.Length > 0)
-        yield return currentLine.ToString().Trim();
+        yield return (currentLine.ToString().Trim(), false);
 }
 
 static bool IsSqlIncomplete(string input)
@@ -636,7 +705,7 @@ async Task ExecuteRollbackTx(CamusConnection connection)
     }
 }
 
-async Task ExecuteQuery(CamusConnection connection, string sql)
+async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = false)
 {
     using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
@@ -656,6 +725,13 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
     {
         Dictionary<string, ColumnValue> current = ConnectionHelper.ReadCurrentRow(reader);
 
+        if (vertical)
+        {
+            WriteVerticalRow(current, rows + 1);
+            rows++;
+            continue;
+        }
+
         if (table is null)
         {
             table = new()
@@ -672,20 +748,7 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
         int i = 0;
 
         foreach (KeyValuePair<string, ColumnValue> item in current)
-        {
-            if (item.Value.Type == ColumnType.Id)
-                row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? item.Value.StrValue!.ToString() : "";
-            else if (item.Value.Type == ColumnType.String)
-                row[i++] = !string.IsNullOrEmpty(item.Value.StrValue) ? Markup.Escape(item.Value.StrValue!.ToString()) : "";
-            else if (item.Value.Type == ColumnType.Integer64)
-                row[i++] = item.Value.LongValue.ToString();
-            else if (item.Value.Type == ColumnType.Float64)
-                row[i++] = item.Value.FloatValue.ToString();
-            else if (item.Value.Type == ColumnType.Bool)
-                row[i++] = item.Value.BoolValue.ToString();
-            else
-                row[i++] = "null";
-        }
+            row[i++] = FormatValue(item.Value);
 
         table.AddRow(row);
         rows++;
@@ -695,6 +758,32 @@ async Task ExecuteQuery(CamusConnection connection, string sql)
         AnsiConsole.Write(table);
 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+}
+
+static string FormatValue(ColumnValue value)
+{
+    return value.Type switch
+    {
+        ColumnType.Id => !string.IsNullOrEmpty(value.StrValue) ? value.StrValue!.ToString() : "",
+        ColumnType.String => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!.ToString()) : "",
+        ColumnType.Integer64 => value.LongValue.ToString(),
+        ColumnType.Float64 => value.FloatValue.ToString(),
+        ColumnType.Bool => value.BoolValue.ToString(),
+        _ => "null"
+    };
+}
+
+static void WriteVerticalRow(Dictionary<string, ColumnValue> row, int rowNumber)
+{
+    AnsiConsole.MarkupLine("[grey]*************************** {0}. row ***************************[/]", rowNumber);
+
+    int nameWidth = row.Keys.Count == 0 ? 0 : row.Keys.Max(k => k.Length);
+
+    foreach (KeyValuePair<string, ColumnValue> item in row)
+    {
+        string name = Markup.Escape(item.Key.PadLeft(nameWidth));
+        AnsiConsole.MarkupLine("[blue]{0}[/]: {1}", name, FormatValue(item.Value));
+    }
 }
 
 static async Task ExecuteDDL(CamusConnection connection, string sql)
@@ -758,7 +847,9 @@ static bool IsSystemLevelQuery(string sql)
 {
     string trimmedSql = sql.Trim();
 
-    return trimmedSql.StartsWith("show databases", StringComparison.InvariantCultureIgnoreCase);
+    return trimmedSql.StartsWith("show databases", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show branches from ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase);
 }
 
 static bool IsDatabaseDDL(string sql)
@@ -768,6 +859,14 @@ static bool IsDatabaseDDL(string sql)
     return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase);
+}
+
+static bool ChangesTableSet(string sql)
+{
+    string trimmedSql = sql.TrimStart();
+
+    return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase);
 }
 
 static bool IsDDL(string sql)
@@ -869,8 +968,14 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: Endpoint=http://localhost:5095;Database=test)");
+    AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");
+    AnsiConsole.MarkupLine("                                on terminals whose TERM value Spectre.Console doesn't recognize");
+    AnsiConsole.MarkupLine("  --diagnose-terminal           Print terminal capabilities and exit (why rich mode is on/off)");
     AnsiConsole.MarkupLine("  -h, --help                    Show this help message");
     AnsiConsole.MarkupLine("  -v, --version                 Show version information");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Environment variables:[/]");
+    AnsiConsole.MarkupLine("  CAMUS_FORCE_RICH=1            Same as [cyan]--force-rich[/] (accepts 1/true/yes)");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
     AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory|tpcc>  Create schema and seed data for a workload");
@@ -892,6 +997,23 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init tpcc --database tpcc --rows 1");
     AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
+}
+
+static bool ConsumeFlag(ref string[] args, string flag)
+{
+    bool present = Array.Exists(args, a => string.Equals(a, flag, StringComparison.OrdinalIgnoreCase));
+    if (present)
+        args = [.. args.Where(a => !string.Equals(a, flag, StringComparison.OrdinalIgnoreCase))];
+
+    return present;
+}
+
+static bool IsTruthy(string? value)
+{
+    return !string.IsNullOrEmpty(value)
+        && (value == "1"
+            || string.Equals(value, "true", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase));
 }
 
 static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
