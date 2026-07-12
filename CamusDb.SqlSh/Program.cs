@@ -13,6 +13,7 @@ using Spectre.Console;
 using System.Diagnostics;
 using System.Globalization;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Text;
 using System.Text.Json;
 
@@ -355,6 +356,7 @@ StringBuilder pendingSql = new();
 
 while (true)
 {
+    string? lastSql = null;
     try
     {
         string? sql;
@@ -432,6 +434,7 @@ while (true)
         }
 
         pendingSql.Clear();
+        lastSql = executableSql;
 
         // Add some history
         if (editor is not null)
@@ -447,7 +450,9 @@ while (true)
     catch (Exception ex)
     {
         string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
-        AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}\n", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
+        AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
+        WriteErrorCaret(lastSql, ex.Message);
+        AnsiConsole.WriteLine();
 
         // A failed statement aborts the transaction server-side, so the local handle is
         // now stale: any further command (including rollback) would fail with "Unknown
@@ -771,6 +776,42 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
         AnsiConsole.Write(table);
 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+}
+
+// Renders a Rust-compiler-style pointer under the offending line when the error
+// message carries a "(line N, col M)" location, e.g.:
+//
+//     create table x1 (id uuid primary key default(gen_uuid_v7()), name string(20) ...
+//                                                  ^
+static void WriteErrorCaret(string? sql, string message)
+{
+    if (string.IsNullOrEmpty(sql))
+        return;
+
+    Match m = Regex.Match(message, @"line\s+(\d+),\s*col\s+(\d+)", RegexOptions.IgnoreCase);
+    if (!m.Success)
+        return;
+
+    if (!int.TryParse(m.Groups[1].Value, out int line) || !int.TryParse(m.Groups[2].Value, out int col))
+        return;
+
+    string[] lines = sql.Replace("\r\n", "\n").Split('\n');
+    if (line < 1 || line > lines.Length)
+        return;
+
+    string source = lines[line - 1];
+
+    // Columns are 1-based; clamp into the line so a caret always renders.
+    int caret = Math.Clamp(col - 1, 0, source.Length);
+
+    // Preserve tabs in the padding so the caret stays aligned with the source.
+    StringBuilder pad = new();
+    for (int i = 0; i < caret; i++)
+        pad.Append(source[i] == '\t' ? '\t' : ' ');
+
+    AnsiConsole.WriteLine();
+    AnsiConsole.WriteLine("  " + source);
+    AnsiConsole.MarkupLine("  [red]{0}^[/]", pad.ToString());
 }
 
 static string FormatValue(ColumnValue value)
