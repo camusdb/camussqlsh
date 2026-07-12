@@ -40,6 +40,7 @@ internal static class ConnectionHelper
                     "Integer64" => new ColumnValue { Type = ColumnType.Integer64, LongValue = reader.GetInt64(i) },
                     "Bool" => new ColumnValue { Type = ColumnType.Bool, BoolValue = reader.GetBoolean(i) },
                     "Float64" => new ColumnValue { Type = ColumnType.Float64, FloatValue = (float)reader.GetDouble(i) },
+                    "Uuid" => new ColumnValue { Type = ColumnType.Uuid, UuidValue = reader.GetGuid(i).ToString() },
                     _ => new ColumnValue { Type = ColumnType.String, StrValue = reader.GetString(i) }
                 };
             row[reader.GetName(i)] = cv;

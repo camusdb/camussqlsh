@@ -11,6 +11,7 @@ using CommandLine;
 using RadLine;
 using Spectre.Console;
 using System.Diagnostics;
+using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -18,9 +19,11 @@ using System.Text.Json;
 string? informationalVersion = Assembly.GetExecutingAssembly()
     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()
     ?.InformationalVersion;
+
 string version = informationalVersion?.Split('+')[0]
     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
     ?? "unknown";
+
 Console.WriteLine($"CamusDB SQL Shell {version} (alpha)\n");
 
 int workloadIdx = Array.FindIndex(args, a => string.Equals(a, "workload", StringComparison.OrdinalIgnoreCase));
@@ -152,6 +155,8 @@ if (richEditorSupported)
         "date",
         "datetime",
         "timestamp",
+        "uuid",
+        "guid",
         "array",
         "is",
         "on",
@@ -209,6 +214,8 @@ if (richEditorSupported)
         "avg",
         "sum",
         "gen_id",
+        "gen_uuid_v4",
+        "gen_uuid_v7",
         "current_timestamp",
         "now",
         "current_date",
@@ -278,12 +285,18 @@ if (richEditorSupported)
         "(?<doublequote>\"(?:\\\\\"|[^\"])*\")"
     ];
 
+    string[] commentRegexes = [
+        @"(?<linecomment>--.*$)",
+        @"(?<blockcomment>/\*[\s\S]*?(\*/|$))"
+    ];
+
     WordHighlighter worldHighlighter = new();
 
     Style funcStyle = new(foreground: Color.Lime);
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
     Style constantsStyle = new(foreground: Color.LightPink3);
+    Style commentStyle = new(foreground: Color.Grey58);
 
     foreach (string keyword in keywords)
         worldHighlighter.AddWord(keyword, keywordStyle);
@@ -296,6 +309,9 @@ if (richEditorSupported)
 
     foreach (string constant in constants)
         worldHighlighter.AddWord(constant, constantsStyle);
+
+    foreach (string commentRegex in commentRegexes)
+        worldHighlighter.AddRegex(commentRegex, commentStyle);
 
     foreach (string regex in regexes)
         worldHighlighter.AddRegex(regex, constantsStyle);
@@ -453,20 +469,20 @@ async Task LoadSource(CamusConnection connection, string paths)
         return;
     }
 
-    int numberLine = 0;
+    //int numberLine = 0;
     string fileContents = await File.ReadAllTextAsync(paths);
 
     foreach ((string sql, bool vertical) in EscapeStringIntoLines(fileContents))
     {
         if (string.IsNullOrEmpty(sql))
         {
-            numberLine++;
+            //numberLine++;
             continue;
         }
 
         await ExecuteSql(connection, vertical ? sql + "\\G" : sql);
 
-        numberLine++;
+        //numberLine++;
     }
 }
 
@@ -606,7 +622,7 @@ static bool IsSqlIncomplete(string input)
     if (inSingleQuote || inDoubleQuote || parenDepth > 0)
         return true;
 
-    return trimmed.EndsWith(",", StringComparison.Ordinal);
+    return trimmed.EndsWith(',');
 }
 
 static async Task SaveHistory(string historyPath, List<string>? history)
@@ -620,18 +636,15 @@ static void AddHistory(List<string>? history, string sql)
     if (history is null)
         return;
 
-    if (history.Count > 0 &&
-        string.Equals(history[^1], sql, StringComparison.Ordinal))
-    {
+    if (history.Count > 0 && string.Equals(history[^1], sql, StringComparison.Ordinal))
         return;
-    }
 
     history.Add(sql);
 }
 
 async Task ExecuteNonQuery(CamusConnection connection, string sql)
 {
-    using CamusCommand cmd = connection.CreateCamusCommand(sql);
+    await using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
     cmd.CommandTimeout = 60;
     cmd.Transaction = transaction;
@@ -707,7 +720,7 @@ async Task ExecuteRollbackTx(CamusConnection connection)
 
 async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = false)
 {
-    using CamusCommand cmd = connection.CreateSelectCommand(sql);
+    await using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
     cmd.CommandTimeout = 60;
     cmd.Transaction = transaction;
@@ -764,11 +777,12 @@ static string FormatValue(ColumnValue value)
 {
     return value.Type switch
     {
-        ColumnType.Id => !string.IsNullOrEmpty(value.StrValue) ? value.StrValue!.ToString() : "",
-        ColumnType.String => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!.ToString()) : "",
+        ColumnType.Id => !string.IsNullOrEmpty(value.StrValue) ? value.StrValue! : "",
+        ColumnType.String => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!) : "",
         ColumnType.Integer64 => value.LongValue.ToString(),
-        ColumnType.Float64 => value.FloatValue.ToString(),
+        ColumnType.Float64 => value.FloatValue.ToString(CultureInfo.InvariantCulture),
         ColumnType.Bool => value.BoolValue.ToString(),
+        ColumnType.Uuid => !string.IsNullOrEmpty(value.UuidValue) ? value.UuidValue! : "",
         _ => "null"
     };
 }
@@ -923,7 +937,7 @@ static string SwapDatabase(string connectionString, string newDatabase)
 
 static async Task<List<string>> GetHistory(string historyPath)
 {
-    List<string>? history = new();
+    List<string>? history = [];
 
     if (File.Exists(historyPath))
     {
@@ -938,7 +952,7 @@ static async Task<List<string>> GetHistory(string historyPath)
         }
     }
 
-    history ??= new();
+    history ??= [];
     history = RemoveAdjacentDuplicates(history);
 
     return history;
@@ -946,7 +960,7 @@ static async Task<List<string>> GetHistory(string historyPath)
 
 static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
 {
-    List<string> result = new();
+    List<string> result = [];
 
     foreach (string item in history)
     {
