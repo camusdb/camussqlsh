@@ -884,6 +884,7 @@ static bool IsQueryable(string sql)
 
     return trimmedSql.StartsWith("select ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("explain ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("analyze ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("desc ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
