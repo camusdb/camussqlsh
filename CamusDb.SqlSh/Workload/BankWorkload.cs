@@ -67,7 +67,7 @@ internal static class BankWorkload
             if (await reader.ReadAsync())
             {
                 Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
-                if (row.TryGetValue("cnt", out ColumnValue? val) && val is not null)
+                if (row.TryGetValue("cnt", out ColumnValue val))
                     accountCount = val.LongValue;
             }
         }

@@ -7,4 +7,5 @@ Radline/Radline/.vs
 Radline/Radline.Tests/bin
 Radline/Radline.Tests/obj
 CamusDb.SqlSh/nupkg/
+CamusDb.SqlSh/.idea/
 .DS_Store

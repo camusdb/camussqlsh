@@ -665,7 +665,7 @@ internal static class TpccWorkload
             while (await findReader.ReadAsync())
             {
                 Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(findReader);
-                if (row.TryGetValue("no_o_id", out ColumnValue? v) && v is not null)
+                if (row.TryGetValue("no_o_id", out ColumnValue v))
                 {
                     long oid = v.LongValue;
                     if (minOId is null || oid < minOId)
@@ -762,7 +762,7 @@ internal static class TpccWorkload
         while (await reader.ReadAsync())
         {
             Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
-            if (row.TryGetValue("d_next_o_id", out ColumnValue? v) && v is not null)
+            if (row.TryGetValue("d_next_o_id", out ColumnValue v))
                 return v.LongValue;
         }
         return 1;
@@ -777,7 +777,7 @@ internal static class TpccWorkload
         while (await reader.ReadAsync())
         {
             Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
-            if (row.TryGetValue(column, out ColumnValue? v) && v is not null)
+            if (row.TryGetValue(column, out ColumnValue v))
                 result.Add(v.LongValue);
         }
         return result;

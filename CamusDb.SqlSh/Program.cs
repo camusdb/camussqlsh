@@ -102,6 +102,13 @@ LineEditor? editor = null;
 CamusTransaction? transaction = null;
 SqlCompletion? sqlCompletion = null;
 
+// Non-interactive mode: run the supplied SQL, then exit.
+if (!string.IsNullOrWhiteSpace(opts.Execute))
+{
+    await ExecuteSql(connection, opts.Execute);
+    return;
+}
+
 bool richEditorSupported = LineEditor.IsSupported(AnsiConsole.Console);
 
 if (richEditorSupported)
@@ -128,6 +135,7 @@ if (richEditorSupported)
         "index",
         "indexes",
         "constraint",
+        "check",
         "limit",
         "insert",
         "into",
@@ -142,6 +150,7 @@ if (richEditorSupported)
         "string",
         "char",
         "varchar",
+        "text",
         "int",
         "int64",
         "float32",
@@ -187,6 +196,7 @@ if (richEditorSupported)
         "transaction",
         "commit",
         "rollback",
+        "evict",
         "as",
         "distinct",
         "cast",
@@ -245,6 +255,15 @@ if (richEditorSupported)
         "rtrim",
         "substring",
         "replace",
+        "regexp_like",
+        "regexp_match",
+        "regexp_matches",
+        "regexp_replace",
+        "regexp_substr",
+        "regexp_instr",
+        "regexp_count",
+        "regexp_split_to_array",
+        "regexp_split_to_table",
         "contains",
         "starts_with",
         "ends_with",
@@ -255,10 +274,17 @@ if (richEditorSupported)
         "json_value",
         "json_contains",
         "json_array_length",
+        "coalesce",
+        "ifnull",
+        "nvl",
         "to_string",
         "to_int64",
         "to_float64",
+        "to_float32",
         "to_bool",
+        "to_bytes",
+        "to_date",
+        "to_datetime",
         "to_id",
         "str_id",
     ];
@@ -1024,6 +1050,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: Endpoint=http://localhost:5095;Database=test)");
+    AnsiConsole.MarkupLine("  -e, --execute                 Execute a SQL statement (or ;-separated statements) and exit");
     AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");
     AnsiConsole.MarkupLine("                                on terminals whose TERM value Spectre.Console doesn't recognize");
     AnsiConsole.MarkupLine("  --diagnose-terminal           Print terminal capabilities and exit (why rich mode is on/off)");
@@ -1047,6 +1074,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
     AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
     AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
@@ -1107,4 +1135,7 @@ public sealed class Options
 
     [Option('c', "connection-source", Required = false, HelpText = "Set the connection string")]
     public string? ConnectionSource { get; set; }
+
+    [Option('e', "execute", Required = false, HelpText = "Execute a SQL statement (or ;-separated statements) and exit")]
+    public string? Execute { get; set; }
 }

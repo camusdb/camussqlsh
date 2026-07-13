@@ -89,7 +89,7 @@ internal sealed class SqlCompletion : ITextCompletion
             while (await reader.ReadAsync())
             {
                 Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
-                string? name = row.Values.FirstOrDefault()?.StrValue;
+                string? name = row.Values.Count > 0 ? row.Values.First().StrValue : null;
 
                 if (!string.IsNullOrWhiteSpace(name))
                     names.Add(name);

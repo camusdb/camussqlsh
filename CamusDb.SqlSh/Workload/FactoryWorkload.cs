@@ -266,7 +266,7 @@ internal static class FactoryWorkload
         while (await reader.ReadAsync())
         {
             Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
-            if (row.TryGetValue("id", out ColumnValue? val) && val is not null && !string.IsNullOrEmpty(val.StrValue))
+            if (row.TryGetValue("id", out ColumnValue val) && !string.IsNullOrEmpty(val.StrValue))
                 ids.Add(val.StrValue);
         }
         return ids;

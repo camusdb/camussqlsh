@@ -1,6 +1,6 @@
 # CamusDB SQL Shell
 
-`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive `-e`/`--execute` mode for running SQL and exiting.
 
 ## Installation
 
@@ -60,6 +60,7 @@ camus-cli [database] [options]
 | --- | --- |
 | `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
 | `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
+| `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
 | `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
 | `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
 | `-h`, `--help` | Show help. |
@@ -77,6 +78,7 @@ Examples:
 $ camus-cli
 $ camus-cli northwind
 $ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
+$ camus-cli northwind -e "select * from users"
 $ camus-cli --version
 $ camus-cli -v
 $ camus-cli --help
@@ -123,6 +125,42 @@ Run SQL from a file:
 
 ```sql
 source ./schema.sql
+```
+
+## Non-Interactive Execution
+
+Pass `-e` (or `--execute`) with a SQL string to run it immediately and exit, without
+starting the interactive prompt. This is useful for scripts, cron jobs, CI pipelines, and
+one-off queries:
+
+```shell
+$ camus-cli northwind -e "select * from users"
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -e "show tables"
+```
+
+The target database is taken from the positional `[database]` argument or the `-c`
+connection string, exactly as in interactive mode.
+
+Results are rendered the same way as in the interactive shell: query statements print a
+table, while DDL and mutation statements print affected row counts.
+
+You can pass several statements separated by semicolons; they run in order:
+
+```shell
+$ camus-cli demo -e "insert into users (id, name) values (gen_id(), 'Ada'); select * from users"
+```
+
+Vertical output with `\G` also works in this mode:
+
+```shell
+$ camus-cli demo -e "select * from users\G"
+```
+
+The process exits after the SQL completes, so `-e` can be combined with shell redirection
+and piping like any other command:
+
+```shell
+$ camus-cli demo -e "select * from users" > users.txt
 ```
 
 ## Multiline Input
