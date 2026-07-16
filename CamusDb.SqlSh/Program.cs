@@ -44,6 +44,7 @@ if (args.Length > 0 && (args[0] == "--help" || args[0] == "-h"))
 }
 
 // Consumed here so CommandLineParser doesn't reject them as unknown options.
+bool debugKeys = ConsumeFlag(ref args, "--debug-keys");
 bool diagnoseTerminal = ConsumeFlag(ref args, "--diagnose-terminal");
 bool forceRich = ConsumeFlag(ref args, "--force-rich")
     || IsTruthy(Environment.GetEnvironmentVariable("CAMUS_FORCE_RICH"));
@@ -88,6 +89,23 @@ if (diagnoseTerminal)
         AnsiConsole.MarkupLine("[grey]or set[/] [cyan]TERM=xterm-256color[/][grey].[/]");
     }
 
+    return;
+}
+
+if (debugKeys)
+{
+    Console.Write("\u001b[?2004h"); // enable bracketed paste, like the real editor does
+    Console.WriteLine("Key diagnostic. Paste your multi-line SQL now. Press Ctrl+D to finish.\n");
+    int n = 0;
+    while (true)
+    {
+        ConsoleKeyInfo k = Console.ReadKey(intercept: true);
+        if (k.Key == ConsoleKey.D && (k.Modifiers & ConsoleModifiers.Control) != 0)
+            break;
+        Console.WriteLine($"#{n++,-3} Key={k.Key}({(int)k.Key})  Char=0x{(int)k.KeyChar:X2}  Mods={k.Modifiers}");
+    }
+    Console.Write("\u001b[?2004l");
+    Console.WriteLine("\nDone. Copy everything above and share it.");
     return;
 }
 
@@ -354,6 +372,19 @@ if (richEditorSupported)
         Highlighter = worldHighlighter
     };
 
+    // Enter submits the statement. To insert a new line without submitting, RadLine binds
+    // Shift+Enter by default, but most terminals send a plain Enter for that combo and never
+    // deliver the Shift modifier. Add alternatives that terminals can actually distinguish:
+    //   - Alt/Option+Enter: natural, works in iTerm2 and any terminal with Option-as-Meta.
+    //   - Ctrl+O: a real control character (0x0F), so it works in every terminal as a fallback.
+    editor.KeyBindings.Add<NewLineCommand>(ConsoleKey.Enter, ConsoleModifiers.Alt);
+    editor.KeyBindings.Add<NewLineCommand>(ConsoleKey.O, ConsoleModifiers.Control);
+
+    // A pasted newline arrives as a LineFeed (0x0A), which .NET reports as Enter+Control
+    // (real Enter is a CarriageReturn with no modifiers). Binding Enter+Control to a new line
+    // keeps multi-line pastes intact instead of silently collapsing them onto one line.
+    editor.KeyBindings.Add<NewLineCommand>(ConsoleKey.Enter, ConsoleModifiers.Control);
+
     if (history != null)
     {
         foreach (string item in history)
@@ -380,6 +411,11 @@ if (sqlCompletion is not null && HasDatabase(activeConnectionString))
 
 StringBuilder pendingSql = new();
 
+// Deliver Ctrl+C to the line editor as input instead of killing the process, so the editor can
+// clear a non-empty prompt on the first press and only exit when the prompt is already empty.
+if (editor is not null)
+    Console.TreatControlCAsInput = true;
+
 while (true)
 {
     string? lastSql = null;
@@ -392,8 +428,35 @@ while (true)
         else
             sql = AnsiConsole.Prompt(new TextPrompt<string>("camus> ").AllowEmpty());
 
+        // The editor returns null when Ctrl+C is pressed on an empty prompt.
+        if (sql is null)
+        {
+            // If a multi-statement is being accumulated, clear that first instead of exiting.
+            if (pendingSql.Length > 0)
+            {
+                pendingSql.Clear();
+                continue;
+            }
+
+            AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
+
+            if (transaction is not null)
+            {
+                AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
+                await ExecuteRollbackTx(connection);
+            }
+
+            await SaveHistory(historyPath, history);
+            break;
+        }
+
         if (string.IsNullOrWhiteSpace(sql))
             continue;
+
+        // Pasted SQL often carries "smart" curly quotes (from editors/chat apps) that the parser
+        // doesn't recognize as string delimiters. Fold them back to straight quotes so the
+        // statement both parses server-side and is seen as complete here.
+        sql = NormalizeSmartQuotes(sql);
 
         string sqlTrim = sql.Trim();
 
@@ -519,6 +582,10 @@ async Task LoadSource(CamusConnection connection, string paths)
 
 async Task ExecuteSql(CamusConnection connection, string input)
 {
+    // Also fold smart quotes here so the -e/--execute flag and `source` files benefit, not just
+    // the interactive prompt. Idempotent, so re-folding an already-normalized statement is a no-op.
+    input = NormalizeSmartQuotes(input);
+
     foreach ((string sql, bool vertical) in EscapeStringIntoLines(input))
     {
         if (string.IsNullOrWhiteSpace(sql))
@@ -606,6 +673,34 @@ static IEnumerable<(string Sql, bool Vertical)> EscapeStringIntoLines(string inp
 
     if (currentLine.Length > 0)
         yield return (currentLine.ToString().Trim(), false);
+}
+
+static char FoldSmartQuote(char c) => c switch
+{
+    // Single curly quotes and low-9 variants -> '
+    '‘' or '’' or '‚' or '‛' => '\'',
+    // Double curly quotes and low-9 variants -> "
+    '“' or '”' or '„' or '‟' => '"',
+    _ => c,
+};
+
+static string NormalizeSmartQuotes(string input)
+{
+    StringBuilder? sb = null;
+    for (int i = 0; i < input.Length; i++)
+    {
+        char folded = FoldSmartQuote(input[i]);
+        if (folded == input[i])
+        {
+            sb?.Append(input[i]);
+            continue;
+        }
+
+        sb ??= new StringBuilder(input, 0, i, input.Length);
+        sb.Append(folded);
+    }
+
+    return sb?.ToString() ?? input;
 }
 
 static bool IsSqlIncomplete(string input)
