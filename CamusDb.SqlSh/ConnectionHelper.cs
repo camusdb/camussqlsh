@@ -73,4 +73,34 @@ internal static class ConnectionHelper
 
         return connection;
     }
+
+    /// <summary>
+    /// Opens the first connection string in <paramref name="attempts"/> that connects, returning
+    /// the live connection together with the connection string that won. Used to prefer gRPC and
+    /// silently fall back to REST when the gRPC endpoint can't be reached; the last attempt's
+    /// exception is rethrown if every attempt fails.
+    /// </summary>
+    internal static async Task<(CamusConnection Connection, string ConnectionString)> OpenFirstAsync(
+        IReadOnlyList<string> attempts)
+    {
+        Exception? lastError = null;
+
+        for (int i = 0; i < attempts.Count; i++)
+        {
+            string attempt = attempts[i];
+            try
+            {
+                CamusConnection connection = await OpenAsync(attempt);
+                return (connection, attempt);
+            }
+            catch (Exception ex) when (i < attempts.Count - 1)
+            {
+                // Not the last attempt: remember the error and fall through to the next transport.
+                lastError = ex;
+            }
+        }
+
+        // Only reached when the list was empty; the loop rethrows the final attempt's error otherwise.
+        throw lastError ?? new InvalidOperationException("No connection attempts were provided.");
+    }
 }

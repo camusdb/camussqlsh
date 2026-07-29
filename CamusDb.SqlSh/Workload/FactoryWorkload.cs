@@ -9,10 +9,59 @@
 using CamusDB.Client;
 using Spectre.Console;
 using System.Diagnostics;
+using static WorkloadHelpers;
 
 internal static class FactoryWorkload
 {
-    internal static async Task InitAsync(CamusConnection conn)
+    private const int BatchSize = 5;
+
+    // -------------------------------------------------------------------------
+    // SQL templates — every value travels as a bound parameter. GEN_ID() stays in the
+    // text because it's a server-side function call, not a value.
+    // -------------------------------------------------------------------------
+
+    private const string RobotInsertSql =
+        "INSERT INTO robots (id, name, kind, year) VALUES (GEN_ID(), @name, @kind, @year)";
+
+    private const string CustomerInsertSql =
+        "INSERT INTO customers (id, name, email, country) VALUES (GEN_ID(), @name, @email, @country)";
+
+    private const string InventoryInsertSql =
+        "INSERT INTO inventory (id, robot_id, quantity, unit_price) VALUES (GEN_ID(), @robot_id, @quantity, @unit_price)";
+
+    private const string OrderInsertSql =
+        "INSERT INTO orders (id, customer_id, robot_id, status, order_date, total) " +
+        "VALUES (GEN_ID(), @customer_id, @robot_id, @status, @order_date, @total)";
+
+    private const string OwnershipInsertSql =
+        "INSERT INTO robot_ownership (id, robot_id, customer_id, acquired_date) " +
+        "VALUES (GEN_ID(), @robot_id, @customer_id, @acquired_date)";
+
+    private const string InventoryByKindSql =
+        "SELECT r.name, i.quantity, i.unit_price FROM robots r JOIN inventory i ON r.id = i.robot_id WHERE r.kind = @kind";
+
+    private const string OrdersByCustomerSql =
+        "SELECT id, robot_id, status, order_date, total FROM orders WHERE customer_id = @customer_id";
+
+    private const string DecrementInventorySql =
+        "UPDATE inventory SET quantity = quantity - 1 WHERE robot_id = @robot_id AND quantity > 0";
+
+    private const string RestockInventorySql =
+        "UPDATE inventory SET quantity = quantity + @quantity WHERE robot_id = @robot_id";
+
+    private static readonly string[] Statuses = ["pending", "shipped", "delivered", "cancelled"];
+
+    private static readonly string[] Kinds =
+        ["android", "protocol", "astromech", "ai", "cleanup", "probe", "combat", "service", "medical"];
+
+    private static readonly double[] Prices =
+        [4999.99, 8999.00, 3500.00, 12000.00, 2200.00, 7800.00, 15000.00, 9500.00, 1800.00, 5500.00];
+
+    // -------------------------------------------------------------------------
+    // Init
+    // -------------------------------------------------------------------------
+
+    internal static async Task InitAsync(CamusConnection conn, int concurrency, CamusTransactionOptions txOptions)
     {
         AnsiConsole.MarkupLine("[cyan]Creating factory schema...[/]");
 
@@ -33,113 +82,151 @@ internal static class FactoryWorkload
         ];
 
         foreach (string ddl in ddls)
-            await WorkloadHelpers.DDL(conn, ddl);
+            await DDL(conn, ddl);
+
+        // Index the run-phase predicate columns. A non-indexed predicate takes a [-inf,+inf] range lock
+        // over the whole table, which serializes the workers however many of them there are.
+        string[] indexes =
+        [
+            "ALTER TABLE robots ADD INDEX idx_robots_kind (kind)",
+            "ALTER TABLE inventory ADD INDEX idx_inventory_robot (robot_id)",
+            "ALTER TABLE orders ADD INDEX idx_orders_customer (customer_id)",
+            "ALTER TABLE robot_ownership ADD INDEX idx_ownership_robot (robot_id)",
+        ];
+
+        foreach (string index in indexes)
+        {
+            // A re-run of init hits an already-created index; that's not a failure.
+            try { await DDL(conn, index); } catch (CamusException) { }
+        }
 
         AnsiConsole.MarkupLine("[green]Schema ready.[/] Clearing existing data...");
         foreach (string t in new[] { "robot_ownership", "orders", "inventory", "customers", "robots" })
-            await WorkloadHelpers.Exec(conn, $"DELETE FROM {t} WHERE id IS NOT NULL");
+            await Exec(conn, $"DELETE FROM {t} WHERE id IS NOT NULL");
 
-        AnsiConsole.MarkupLine("Inserting seed data...\n");
+        AnsiConsole.MarkupLine("Inserting seed data ([blue]{0}[/] parallel writers)...\n", concurrency);
+
+        (string Name, string Kind, int Year)[] robots =
+        [
+            ("C-3PO",    "protocol",  1977),
+            ("T-800",    "android",   1984),
+            ("R2-D2",    "astromech", 1977),
+            ("HAL 9000", "ai",        1968),
+            ("WALL-E",   "cleanup",   2008),
+            ("EVE",      "probe",     2008),
+            ("Optimus",  "combat",    1984),
+            ("Data",     "android",   1987),
+            ("Bender",   "service",   1999),
+            ("Baymax",   "medical",   2014),
+        ];
+
+        (string Name, string Email, string Country)[] customers =
+        [
+            ("Alice Nakamura", "alice@example.com",  "Japan"),
+            ("Bob Steiner",    "bob@example.com",    "Germany"),
+            ("Clara Fontaine", "clara@example.com",  "France"),
+            ("Diego Herrera",  "diego@example.com",  "Mexico"),
+            ("Elena Volkov",   "elena@example.com",  "Russia"),
+            ("Frank Osei",     "frank@example.com",  "Ghana"),
+            ("Grace Kim",      "grace@example.com",  "South Korea"),
+            ("Hector Perez",   "hector@example.com", "Spain"),
+            ("Ingrid Larsson", "ingrid@example.com", "Sweden"),
+            ("James O'Brien",  "james@example.com",  "Ireland"),
+            ("Keiko Tanaka",   "keiko@example.com",  "Japan"),
+            ("Luca Bianchi",   "luca@example.com",   "Italy"),
+        ];
+
+        Random rng = new(42);
 
         await AnsiConsole.Progress()
             .AutoRefresh(true)
             .HideCompleted(false)
             .StartAsync(async ctx =>
             {
-                ProgressTask tRob = ctx.AddTask("[green]robots    [/]", maxValue: 10);
-                ProgressTask tCus = ctx.AddTask("[green]customers [/]", maxValue: 12);
-                ProgressTask tInv = ctx.AddTask("[green]inventory [/]", maxValue: 10);
+                ProgressTask tRob = ctx.AddTask("[green]robots    [/]", maxValue: robots.Length);
+                ProgressTask tCus = ctx.AddTask("[green]customers [/]", maxValue: customers.Length);
+                ProgressTask tInv = ctx.AddTask("[green]inventory [/]", maxValue: robots.Length);
                 ProgressTask tOrd = ctx.AddTask("[green]orders    [/]", maxValue: 20);
                 ProgressTask tOwn = ctx.AddTask("[green]ownership [/]", maxValue: 10);
 
-                // robots — exact values from spec plus additional ones
-                (string name, string kind, int year)[] robots =
-                [
-                    ("C-3PO",     "protocol",  1977),
-                    ("T-800",     "android",   1984),
-                    ("R2-D2",     "astromech", 1977),
-                    ("HAL 9000",  "ai",        1968),
-                    ("WALL-E",    "cleanup",   2008),
-                    ("EVE",       "probe",     2008),
-                    ("Optimus",   "combat",    1984),
-                    ("Data",      "android",   1987),
-                    ("Bender",    "service",   1999),
-                    ("Baymax",    "medical",   2014),
-                ];
-                foreach (var r in robots)
+                await Seed(conn, txOptions, concurrency, robots.Select(r => (RobotInsertSql, new Param[]
                 {
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO robots (id, name, kind, year) VALUES (GEN_ID(), \"{WorkloadHelpers.Esc(r.name)}\", \"{r.kind}\", {r.year})");
-                    tRob.Increment(1);
-                }
+                    P("@name", ColumnType.String, r.Name),
+                    P("@kind", ColumnType.String, r.Kind),
+                    P("@year", ColumnType.Integer64, (long)r.Year),
+                })).ToList(), tRob);
 
-                // customers
-                (string name, string email, string country)[] customers =
-                [
-                    ("Alice Nakamura",    "alice@example.com",   "Japan"),
-                    ("Bob Steiner",       "bob@example.com",     "Germany"),
-                    ("Clara Fontaine",    "clara@example.com",   "France"),
-                    ("Diego Herrera",     "diego@example.com",   "Mexico"),
-                    ("Elena Volkov",      "elena@example.com",   "Russia"),
-                    ("Frank Osei",        "frank@example.com",   "Ghana"),
-                    ("Grace Kim",         "grace@example.com",   "South Korea"),
-                    ("Hector Perez",      "hector@example.com",  "Spain"),
-                    ("Ingrid Larsson",    "ingrid@example.com",  "Sweden"),
-                    ("James O'Brien",     "james@example.com",   "Ireland"),
-                    ("Keiko Tanaka",      "keiko@example.com",   "Japan"),
-                    ("Luca Bianchi",      "luca@example.com",    "Italy"),
-                ];
-                foreach (var c in customers)
+                await Seed(conn, txOptions, concurrency, customers.Select(c => (CustomerInsertSql, new Param[]
                 {
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO customers (id, name, email, country) VALUES (GEN_ID(), \"{WorkloadHelpers.Esc(c.name)}\", \"{c.email}\", \"{c.country}\")");
-                    tCus.Increment(1);
-                }
+                    P("@name", ColumnType.String, c.Name),
+                    P("@email", ColumnType.String, c.Email),
+                    P("@country", ColumnType.String, c.Country),
+                })).ToList(), tCus);
 
-                // fetch robot IDs for inventory and orders seed
+                // The server generated the OIDs, so read them back before seeding the rows that reference them.
                 List<string> robotIds = await LoadIds(conn, "robots");
                 List<string> customerIds = await LoadIds(conn, "customers");
 
-                Random rng = new(42);
-                double[] prices = [4999.99, 8999.00, 3500.00, 12000.00, 2200.00, 7800.00, 15000.00, 9500.00, 1800.00, 5500.00];
-
                 // inventory — one entry per robot
-                for (int i = 0; i < robotIds.Count; i++)
+                await Seed(conn, txOptions, concurrency, robotIds.Select((robotId, i) => (InventoryInsertSql, new Param[]
                 {
-                    int qty = rng.Next(5, 51);
-                    double price = prices[i % prices.Length];
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO inventory (id, robot_id, quantity, unit_price) VALUES (GEN_ID(), STR_ID(\"{robotIds[i]}\"), {qty}, {price.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)})");
-                    tInv.Increment(1);
-                }
+                    P("@robot_id", ColumnType.Id, robotId),
+                    P("@quantity", ColumnType.Integer64, (long)rng.Next(5, 51)),
+                    P("@unit_price", ColumnType.Float64, Prices[i % Prices.Length]),
+                })).ToList(), tInv);
 
                 // seed orders
-                string[] statuses = ["pending", "shipped", "delivered", "cancelled"];
+                List<(string Sql, Param[] Parameters)> orders = [];
                 for (int i = 0; i < 20; i++)
                 {
-                    string custId = customerIds[rng.Next(customerIds.Count)];
-                    string robotId = robotIds[rng.Next(robotIds.Count)];
-                    string status = statuses[rng.Next(statuses.Length)];
-                    string orderDate = new DateTime(2024, rng.Next(1, 13), rng.Next(1, 28)).ToString("yyyy-MM-dd");
-                    double total = prices[rng.Next(prices.Length)];
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO orders (id, customer_id, robot_id, status, order_date, total) VALUES (GEN_ID(), STR_ID(\"{custId}\"), STR_ID(\"{robotId}\"), \"{status}\", \"{orderDate}\", {total.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)})");
-                    tOrd.Increment(1);
+                    orders.Add((OrderInsertSql,
+                    [
+                        P("@customer_id", ColumnType.Id, customerIds[rng.Next(customerIds.Count)]),
+                        P("@robot_id", ColumnType.Id, robotIds[rng.Next(robotIds.Count)]),
+                        P("@status", ColumnType.String, Statuses[rng.Next(Statuses.Length)]),
+                        P("@order_date", ColumnType.String, new DateTime(2024, rng.Next(1, 13), rng.Next(1, 28)).ToString("yyyy-MM-dd")),
+                        P("@total", ColumnType.Float64, Prices[rng.Next(Prices.Length)]),
+                    ]));
                 }
+                await Seed(conn, txOptions, concurrency, orders, tOrd);
 
                 // seed robot_ownership (10 delivered robots assigned to customers)
-                List<string> deliveredRobots = robotIds.Take(10).ToList();
+                List<(string Sql, Param[] Parameters)> ownership = [];
                 for (int i = 0; i < 10; i++)
                 {
-                    string custId = customerIds[rng.Next(customerIds.Count)];
-                    string robotId = deliveredRobots[i % deliveredRobots.Count];
-                    string date = new DateTime(2024, rng.Next(1, 13), rng.Next(1, 28)).ToString("yyyy-MM-dd");
-                    await WorkloadHelpers.Exec(conn, $"INSERT INTO robot_ownership (id, robot_id, customer_id, acquired_date) VALUES (GEN_ID(), STR_ID(\"{robotId}\"), STR_ID(\"{custId}\"), \"{date}\")");
-                    tOwn.Increment(1);
+                    ownership.Add((OwnershipInsertSql,
+                    [
+                        P("@robot_id", ColumnType.Id, robotIds[i % robotIds.Count]),
+                        P("@customer_id", ColumnType.Id, customerIds[rng.Next(customerIds.Count)]),
+                        P("@acquired_date", ColumnType.String, new DateTime(2024, rng.Next(1, 13), rng.Next(1, 28)).ToString("yyyy-MM-dd")),
+                    ]));
                 }
+                await Seed(conn, txOptions, concurrency, ownership, tOwn);
             });
 
         AnsiConsole.MarkupLine("\n[green]Factory workload initialized.[/]");
         AnsiConsole.MarkupLine("Run [blue]camus-cli workload run factory[/] to start generating activity.");
     }
 
-    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds)
+    private static Task Seed(
+        CamusConnection conn,
+        CamusTransactionOptions txOptions,
+        int concurrency,
+        List<(string Sql, Param[] Parameters)> statements,
+        ProgressTask progress)
+    {
+        return ForEachAsync(Chunk(statements, BatchSize), concurrency, async batch =>
+        {
+            await RunSeedBatch(conn, txOptions, batch);
+            progress.Increment(batch.Count);
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Run
+    // -------------------------------------------------------------------------
+
+    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds, CamusTransactionOptions txOptions)
     {
         List<string> robotIds = await LoadIds(conn, "robots");
         List<string> customerIds = await LoadIds(conn, "customers");
@@ -160,9 +247,6 @@ internal static class FactoryWorkload
         long totalOps = 0;
         long totalErrors = 0;
         Stopwatch sw = Stopwatch.StartNew();
-
-        string[] statuses = ["pending", "shipped", "delivered", "cancelled"];
-        double[] prices = [4999.99, 8999.00, 3500.00, 12000.00, 2200.00, 7800.00, 15000.00, 9500.00, 1800.00, 5500.00];
 
         Task statsPrinter = Task.Run(async () =>
         {
@@ -192,34 +276,40 @@ internal static class FactoryWorkload
                     if (op <= 1)
                     {
                         // read: list inventory for a robot kind
-                        string[] kinds = ["android", "protocol", "astromech", "ai", "cleanup", "probe", "combat", "service", "medical"];
-                        string kind = kinds[rng.Next(kinds.Length)];
-                        using CamusCommand cmd = conn.CreateSelectCommand($"SELECT r.name, i.quantity, i.unit_price FROM robots r JOIN inventory i ON r.id = i.robot_id WHERE r.kind = \"{kind}\"");
-                        cmd.CommandTimeout = 30;
-                        CamusDataReader reader = await cmd.ExecuteReaderAsync();
-                        while (await reader.ReadAsync()) { /* consume */ }
+                        await QueryWithParams(conn, InventoryByKindSql,
+                        [
+                            P("@kind", ColumnType.String, Kinds[rng.Next(Kinds.Length)]),
+                        ], ct: cts.Token);
                     }
                     else if (op == 2)
                     {
                         // read: list orders for a customer
-                        using CamusCommand cmd = conn.CreateSelectCommand($"SELECT id, robot_id, status, order_date, total FROM orders WHERE customer_id = STR_ID(\"{custId}\")");
-                        cmd.CommandTimeout = 30;
-                        CamusDataReader reader = await cmd.ExecuteReaderAsync();
-                        while (await reader.ReadAsync()) { /* consume */ }
+                        await QueryWithParams(conn, OrdersByCustomerSql,
+                        [
+                            P("@customer_id", ColumnType.Id, custId),
+                        ], ct: cts.Token);
                     }
                     else if (op == 3)
                     {
                         // write: place a new order and decrement inventory
-                        string status = "pending";
-                        string orderDate = DateTime.UtcNow.ToString("yyyy-MM-dd");
-                        double total = prices[rng.Next(prices.Length)];
-
-                        CamusTransaction tx = await conn.BeginTransactionAsync();
+                        CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, cts.Token);
                         try
                         {
-                            await WorkloadHelpers.Exec(conn, $"INSERT INTO orders (id, customer_id, robot_id, status, order_date, total) VALUES (GEN_ID(), STR_ID(\"{custId}\"), STR_ID(\"{robotId}\"), \"{status}\", \"{orderDate}\", {total.ToString("F2", System.Globalization.CultureInfo.InvariantCulture)})", tx);
-                            await WorkloadHelpers.Exec(conn, $"UPDATE inventory SET quantity = quantity - 1 WHERE robot_id = STR_ID(\"{robotId}\") AND quantity > 0", tx);
-                            await tx.CommitAsync();
+                            await ExecWithParams(conn, OrderInsertSql,
+                            [
+                                P("@customer_id", ColumnType.Id, custId),
+                                P("@robot_id", ColumnType.Id, robotId),
+                                P("@status", ColumnType.String, "pending"),
+                                P("@order_date", ColumnType.String, DateTime.UtcNow.ToString("yyyy-MM-dd")),
+                                P("@total", ColumnType.Float64, Prices[rng.Next(Prices.Length)]),
+                            ], tx, cts.Token);
+
+                            await ExecWithParams(conn, DecrementInventorySql,
+                            [
+                                P("@robot_id", ColumnType.Id, robotId),
+                            ], tx, cts.Token);
+
+                            await tx.CommitAsync(cts.Token);
                         }
                         catch
                         {
@@ -230,14 +320,21 @@ internal static class FactoryWorkload
                     else if (op == 4)
                     {
                         // write: mark a delivered order as ownership transfer
-                        string date = DateTime.UtcNow.ToString("yyyy-MM-dd");
-                        await WorkloadHelpers.Exec(conn, $"INSERT INTO robot_ownership (id, robot_id, customer_id, acquired_date) VALUES (GEN_ID(), STR_ID(\"{robotId}\"), STR_ID(\"{custId}\"), \"{date}\")");
+                        await ExecWithParams(conn, OwnershipInsertSql,
+                        [
+                            P("@robot_id", ColumnType.Id, robotId),
+                            P("@customer_id", ColumnType.Id, custId),
+                            P("@acquired_date", ColumnType.String, DateTime.UtcNow.ToString("yyyy-MM-dd")),
+                        ], ct: cts.Token);
                     }
                     else
                     {
                         // write: restock inventory
-                        int qty = rng.Next(1, 11);
-                        await WorkloadHelpers.Exec(conn, $"UPDATE inventory SET quantity = quantity + {qty} WHERE robot_id = STR_ID(\"{robotId}\")");
+                        await ExecWithParams(conn, RestockInventorySql,
+                        [
+                            P("@quantity", ColumnType.Integer64, (long)rng.Next(1, 11)),
+                            P("@robot_id", ColumnType.Id, robotId),
+                        ], ct: cts.Token);
                     }
 
                     Interlocked.Increment(ref totalOps);
@@ -259,7 +356,7 @@ internal static class FactoryWorkload
 
     private static async Task<List<string>> LoadIds(CamusConnection conn, string table)
     {
-        List<string> ids = new();
+        List<string> ids = [];
         using CamusCommand cmd = conn.CreateSelectCommand($"SELECT id FROM {table}");
         cmd.CommandTimeout = 30;
         CamusDataReader reader = await cmd.ExecuteReaderAsync();

@@ -9,21 +9,47 @@
 using CamusDB.Client;
 using Spectre.Console;
 using System.Diagnostics;
+using static WorkloadHelpers;
 
 internal static class BankWorkload
 {
     private const int BatchSize = 10;
 
-    internal static async Task InitAsync(CamusConnection conn, int rows)
+    private const string AccountInsertSql =
+        "INSERT INTO accounts (id, balance) VALUES (@id, @balance)";
+
+    private const string TransferInsertSql =
+        "INSERT INTO transactions (id, debit_account, credit_account, amount, created_at) " +
+        "VALUES (@id, @debit_account, @credit_account, @amount, @created_at)";
+
+    private const string DebitSql = "UPDATE accounts SET balance = balance - @amount WHERE id = @id";
+    private const string CreditSql = "UPDATE accounts SET balance = balance + @amount WHERE id = @id";
+
+    internal static async Task InitAsync(CamusConnection conn, int rows, int concurrency, CamusTransactionOptions txOptions)
     {
         AnsiConsole.MarkupLine("[cyan]Creating bank schema...[/]");
 
-        await WorkloadHelpers.DDL(conn, "CREATE TABLE IF NOT EXISTS accounts (id INT64 PRIMARY KEY, balance INT64 NOT NULL)");
-        await WorkloadHelpers.DDL(conn, "CREATE TABLE IF NOT EXISTS transactions (id INT64 PRIMARY KEY, debit_account INT64 NOT NULL, credit_account INT64 NOT NULL, amount INT64 NOT NULL, created_at STRING NOT NULL)");
+        await DDL(conn, "CREATE TABLE IF NOT EXISTS accounts (id INT64 PRIMARY KEY, balance INT64 NOT NULL)");
+        await DDL(conn, "CREATE TABLE IF NOT EXISTS transactions (id INT64 PRIMARY KEY, debit_account INT64 NOT NULL, credit_account INT64 NOT NULL, amount INT64 NOT NULL, created_at STRING NOT NULL)");
 
-        AnsiConsole.MarkupLine("[green]Schema ready.[/] Inserting [blue]{0}[/] accounts...\n", rows);
+        AnsiConsole.MarkupLine("[green]Schema ready.[/] Inserting [blue]{0}[/] accounts ([blue]{1}[/] parallel writers)...\n", rows, concurrency);
 
-        Random rng = new();
+        Random rng = new(42);
+
+        // Build every statement up front so seeding is a pure fan-out: the RNG stays single-threaded
+        // (Random isn't thread-safe) and the batches below are independent of each other.
+        List<(string Sql, Param[] Parameters)> statements = new(rows);
+        for (int i = 1; i <= rows; i++)
+        {
+            long balance = rng.NextInt64(10_000L, 1_000_000L); // $100–$10,000 in cents
+            statements.Add((AccountInsertSql,
+            [
+                P("@id", ColumnType.Integer64, (long)i),
+                P("@balance", ColumnType.Integer64, balance),
+            ]));
+        }
+
+        List<List<(string Sql, Param[] Parameters)>> batches = Chunk(statements, BatchSize);
 
         await AnsiConsole.Progress()
             .AutoRefresh(true)
@@ -32,32 +58,18 @@ internal static class BankWorkload
             {
                 ProgressTask task = ctx.AddTask("[green]accounts[/]", maxValue: rows);
 
-                // accounts — batch BatchSize at a time
-                var batch = new List<string>(BatchSize);
-                for (int i = 1; i <= rows; i++)
+                await ForEachAsync(batches, concurrency, async batch =>
                 {
-                    long balance = rng.NextInt64(10_000L, 1_000_000L); // $100–$10,000 in cents
-                    batch.Add($"INSERT INTO accounts (id, balance) VALUES ({i}, {balance})");
-                    task.Increment(1);
-
-                    if (batch.Count >= BatchSize)
-                    {
-                        await RunBatch(conn, batch);
-                        batch.Clear();
-                    }
-                }
-                if (batch.Count > 0)
-                {
-                    await RunBatch(conn, batch);
-                    batch.Clear();
-                }
+                    await RunSeedBatch(conn, txOptions, batch);
+                    task.Increment(batch.Count);
+                });
             });
 
         AnsiConsole.MarkupLine("\n[green]Bank workload initialized:[/] {0} accounts in database.", rows);
         AnsiConsole.MarkupLine("Run [blue]camus-cli workload run bank[/] to start generating transfers.");
     }
 
-    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds)
+    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds, CamusTransactionOptions txOptions)
     {
         long accountCount = 0;
         using (CamusCommand countCmd = conn.CreateSelectCommand("SELECT COUNT(*) as cnt FROM accounts"))
@@ -104,9 +116,9 @@ internal static class BankWorkload
             }
         });
 
-        Task[] workers = Enumerable.Range(0, concurrency).Select(_ => Task.Run(async () =>
+        Task[] workers = Enumerable.Range(0, concurrency).Select(workerIdx => Task.Run(async () =>
         {
-            Random rng = new();
+            Random rng = new(workerIdx);
             while (!cts.Token.IsCancellationRequested)
             {
                 try
@@ -119,13 +131,31 @@ internal static class BankWorkload
                     long txId = Interlocked.Increment(ref txCounter);
                     string ts = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
 
-                    CamusTransaction tx = await conn.BeginTransactionAsync();
+                    CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, cts.Token);
                     try
                     {
-                        await WorkloadHelpers.Exec(conn, $"UPDATE accounts SET balance = balance - {amount} WHERE id = {from}", tx);
-                        await WorkloadHelpers.Exec(conn, $"UPDATE accounts SET balance = balance + {amount} WHERE id = {to}", tx);
-                        await WorkloadHelpers.Exec(conn, $"INSERT INTO transactions (id, debit_account, credit_account, amount, created_at) VALUES ({txId}, {from}, {to}, {amount}, '{ts}')", tx);
-                        await tx.CommitAsync();
+                        await ExecWithParams(conn, DebitSql,
+                        [
+                            P("@amount", ColumnType.Integer64, amount),
+                            P("@id", ColumnType.Integer64, (long)from),
+                        ], tx, cts.Token);
+
+                        await ExecWithParams(conn, CreditSql,
+                        [
+                            P("@amount", ColumnType.Integer64, amount),
+                            P("@id", ColumnType.Integer64, (long)to),
+                        ], tx, cts.Token);
+
+                        await ExecWithParams(conn, TransferInsertSql,
+                        [
+                            P("@id", ColumnType.Integer64, txId),
+                            P("@debit_account", ColumnType.Integer64, (long)from),
+                            P("@credit_account", ColumnType.Integer64, (long)to),
+                            P("@amount", ColumnType.Integer64, amount),
+                            P("@created_at", ColumnType.String, ts),
+                        ], tx, cts.Token);
+
+                        await tx.CommitAsync(cts.Token);
                         Interlocked.Increment(ref totalOps);
                     }
                     catch
@@ -147,21 +177,5 @@ internal static class BankWorkload
         double elapsed = sw.Elapsed.TotalSeconds;
         AnsiConsole.MarkupLine("\n[green]Done:[/] {0} ops in {1:F1}s ({2:F1} ops/sec), {3} errors",
             totalOps, elapsed, elapsed > 0 ? totalOps / elapsed : 0, totalErrors);
-    }
-
-    private static async Task RunBatch(CamusConnection conn, List<string> batch)
-    {
-        CamusTransaction tx = await conn.BeginTransactionAsync();
-        try
-        {
-            foreach (string sql in batch)
-                await WorkloadHelpers.Exec(conn, sql, tx);
-            await tx.CommitAsync();
-        }
-        catch
-        {
-            try { await tx.RollbackAsync(); } catch { }
-            throw;
-        }
     }
 }

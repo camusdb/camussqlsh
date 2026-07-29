@@ -50,6 +50,61 @@ $ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
 
 The connection string must include both `Endpoint` and `Database`.
 
+## Authentication
+
+CamusDB authentication is **off by default**, and a shell started without credentials behaves
+exactly as before. Against a server started with `CAMUSDB_AUTH_ENABLED=true`, pass a user:
+
+```shell
+$ camus-cli northwind -u app -p app-secret
+$ camus-cli northwind -u app                 # prompts: Password:
+```
+
+The password is exchanged **once** for a short-lived bearer token; every statement then carries
+the token, never the password, and the driver renews it before it expires. The banner names the
+identity the session is acting as:
+
+```text
+Connected to http://localhost:5096 over gRPC, database: northwind, user: app
+```
+
+Credentials can also come from `CAMUS_USER` / `CAMUS_PASSWORD`, or straight from the connection
+string (`-c "…;User=app;Password=app-secret"`). A flag wins over the same key inside `-c`. When
+another process already holds a token, hand it over with `--token` instead of a password — it is
+used verbatim and never renewed, so its expiry ends the session.
+
+Prefer the environment or the interactive prompt over `-p` on a shared host: a command line is
+readable by every process on the machine.
+
+### Managing users and grants
+
+User and grant administration is server-level — it needs no current database — and requires a
+superuser. The shell routes these statements accordingly, so they work even before a database is
+selected:
+
+```sql
+create user app identified by 'app-secret';
+alter user app identified by 'rotated-secret';
+grant select, insert on northwind.* to app;
+grant select on northwind.orders to reader;
+revoke insert on northwind.* from app;
+show grants for app;
+drop user app;
+```
+
+A statement that inlines a password (`IDENTIFIED … BY '…'`) is recalled with the Up arrow during
+the session but is **not** written to the on-disk history file.
+
+Two errors are worth recognizing:
+
+| Code | Meaning |
+| --- | --- |
+| `CADB0516` | Not authenticated — missing, invalid, or expired credentials. The server returns the same code for a wrong password and an unknown user, so replies can't be used to enumerate accounts. |
+| `CADB0517` | Authenticated, but missing a privilege on a table the statement touches — including tables reached through joins and subqueries. Fix it with a `GRANT`, not by re-authenticating. |
+
+With authentication on, the server refuses credentials over plaintext (`CADB0519`) unless the peer
+is loopback: use an `https://` endpoint against any remote deployment.
+
 ## Command Line Options
 
 ```text
@@ -61,6 +116,9 @@ camus-cli [database] [options]
 | `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
 | `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
 | `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
+| `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
+| `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). |
+| `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
 | `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
 | `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
 | `-h`, `--help` | Show help. |
@@ -71,6 +129,9 @@ Environment variables:
 | Variable | Description |
 | --- | --- |
 | `CAMUS_FORCE_RICH` | Set to `1`, `true`, or `yes` to force the rich line editor (same as `--force-rich`). |
+| `CAMUS_USER` | Default for `-u`. |
+| `CAMUS_PASSWORD` | Default for `-p`. Preferred over `-p` in scripts, since a command line is visible to every process on the host. |
+| `CAMUS_ACCESS_TOKEN` | Default for `--token`. |
 
 Examples:
 
@@ -221,7 +282,7 @@ Executed statements are stored in a JSON history file under the system temporary
 camusdb.history.json
 ```
 
-History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once.
+History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once. Statements that inline a password (`CREATE USER … IDENTIFIED BY '…'`, `ALTER USER …`) are kept out of the file — they stay recallable with `Up` for the rest of the session only.
 
 Use `Up` and `Down` to navigate history. In multiline input, `Up` and `Down` first move between lines; from the first or last line they navigate history.
 

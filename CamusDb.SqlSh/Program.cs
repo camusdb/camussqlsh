@@ -113,17 +113,72 @@ string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.
 
 List<string>? history = await GetHistory(historyPath);
 
-string activeConnectionString = BuildConnectionString(opts);
-CamusConnection connection = await ConnectionHelper.OpenAsync(activeConnectionString);
+// Credentials come from the flags, then the environment. A user given without a password is
+// prompted for one (silently skipped when stdin is piped, so scripts aren't left hanging on a
+// prompt nobody can answer). The password is exchanged for a short-lived token by the driver on
+// the first statement, so it never travels with the SQL.
+string? authUser = opts.User ?? Environment.GetEnvironmentVariable("CAMUS_USER");
+string? authPassword = opts.Password ?? Environment.GetEnvironmentVariable("CAMUS_PASSWORD");
+string? authToken = opts.AccessToken ?? Environment.GetEnvironmentVariable("CAMUS_ACCESS_TOKEN");
+
+if (!string.IsNullOrEmpty(authUser) && string.IsNullOrEmpty(authPassword) && string.IsNullOrEmpty(authToken))
+    authPassword = PromptPassword();
+
+List<string> connectionAttempts = BuildConnectionAttempts(opts, authUser, authPassword, authToken);
+
+CamusConnection connection;
+string activeConnectionString;
+
+try
+{
+    (connection, activeConnectionString) = await ConnectionHelper.OpenFirstAsync(connectionAttempts);
+}
+catch (Exception ex)
+{
+    WriteConnectionError(ex);
+    Environment.ExitCode = 1;
+    return;
+}
+
+// Tell the user where and how they connected, unless they're scripting with -e (keep stdout clean).
+if (string.IsNullOrWhiteSpace(opts.Execute))
+{
+    string server = GetConnValue(activeConnectionString, "Endpoint") ?? "unknown server";
+    string database = GetConnValue(activeConnectionString, "Database") is { Length: > 0 } db
+        ? $"[white]{Markup.Escape(db)}[/]"
+        : "[grey58](none)[/]";
+
+    // Never echo the credential itself — only who the shell is acting as.
+    string identity = GetConnValue(activeConnectionString, "User") is { Length: > 0 } who
+        ? $"[grey58], user:[/] [white]{Markup.Escape(who)}[/]"
+        : HasKey(activeConnectionString, "AccessToken")
+            ? "[grey58], authenticated with a token[/]"
+            : "";
+
+    AnsiConsole.MarkupLine(
+        $"[grey58]Connected to[/] [white]{Markup.Escape(server)}[/] [grey58]over[/] " +
+        $"[white]{DescribeTransport(activeConnectionString)}[/][grey58], database:[/] {database}{identity}\n");
+}
 
 LineEditor? editor = null;
 CamusTransaction? transaction = null;
 SqlCompletion? sqlCompletion = null;
 
-// Non-interactive mode: run the supplied SQL, then exit.
+// Non-interactive mode: run the supplied SQL, then exit. A failure here has no prompt to return
+// to, so report it the way the interactive loop does — a diagnosable line, not a stack trace —
+// and exit non-zero so a caller can tell the statement didn't run.
 if (!string.IsNullOrWhiteSpace(opts.Execute))
 {
-    await ExecuteSql(connection, opts.Execute);
+    try
+    {
+        await ExecuteSql(connection, opts.Execute);
+    }
+    catch (Exception ex)
+    {
+        WriteStatementError(ex, opts.Execute);
+        Environment.ExitCode = 1;
+    }
+
     return;
 }
 
@@ -163,6 +218,10 @@ if (richEditorSupported)
         "rename",
         "column",
         "drop",
+        "force",
+        "relink",
+        "orphan",
+        "include",
         "null",
         "not",
         "string",
@@ -171,6 +230,7 @@ if (richEditorSupported)
         "text",
         "int",
         "int64",
+        "smallint",
         "float32",
         "float64",
         "real",
@@ -198,8 +258,6 @@ if (richEditorSupported)
         "show",
         "use",
         "tables",
-        "view",
-        "views",
         "columns",
         "group",
         "join",
@@ -215,15 +273,26 @@ if (richEditorSupported)
         "commit",
         "rollback",
         "evict",
+        "cache",
+        "comment",
         "as",
+        // AS OF SYSTEM TIME is lexed as one token by the server, but the editor highlights
+        // token by token, so each word is listed on its own.
+        "of",
+        "system",
+        "time",
         "distinct",
         "cast",
+        "case",
+        "when",
+        "then",
+        "else",
+        "end",
         "integer",
         "double",
         "float",
         "databases",
         "to",
-        "at",
         "branch",
         "branches",
         "ancestors",
@@ -234,6 +303,19 @@ if (richEditorSupported)
         "serializable",
         "only",
         "write",
+        "locking",
+        "optimistic",
+        "pessimistic",
+        "user",
+        "identified",
+        "with",
+        "grant",
+        "grants",
+        "revoke",
+        "privileges",
+        "all",
+        "for",
+        "sha256_password",
     ];
 
     string[] functions = [
@@ -525,11 +607,14 @@ while (true)
         pendingSql.Clear();
         lastSql = executableSql;
 
-        // Add some history
+        // Add some history. A statement carrying a plaintext password (CREATE/ALTER USER … IDENTIFIED
+        // BY '…') stays in the in-memory editor history — recalling it with Up is useful — but is kept
+        // out of the on-disk history file, which outlives the session and is world-readable.
         if (editor is not null)
             editor.History.Add(executableSql);
 
-        AddHistory(history, executableSql);
+        if (!CarriesPassword(executableSql))
+            AddHistory(history, executableSql);
 
         await ExecuteSql(connection, executableSql);
 
@@ -538,10 +623,7 @@ while (true)
     }
     catch (Exception ex)
     {
-        string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
-        AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
-        WriteErrorCaret(lastSql, ex.Message);
-        AnsiConsole.WriteLine();
+        WriteStatementError(ex, lastSql);
 
         // A failed statement aborts the transaction server-side, so the local handle is
         // now stale: any further command (including rollback) would fail with "Unknown
@@ -591,7 +673,7 @@ async Task ExecuteSql(CamusConnection connection, string input)
         if (string.IsNullOrWhiteSpace(sql))
             continue;
 
-        bool needsDb = !IsDatabaseDDL(sql) && !IsSystemLevelQuery(sql);
+        bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
         if (needsDb && !HasDatabase(activeConnectionString))
         {
             AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
@@ -606,7 +688,7 @@ async Task ExecuteSql(CamusConnection connection, string input)
         }
         else if (IsQueryable(sql))
             await ExecuteQuery(connection, sql, vertical);
-        else if (IsDatabaseDDL(sql))
+        else if (IsServerLevelDDL(sql))
         {
             string sysCs = GetEndpointConnectionString(activeConnectionString);
             CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
@@ -757,6 +839,13 @@ static async Task SaveHistory(string historyPath, List<string>? history)
         await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
 }
 
+// True when the statement inlines a password, i.e. CREATE USER / ALTER USER … IDENTIFIED
+// [WITH plugin] BY '…'.
+static bool CarriesPassword(string sql)
+{
+    return Regex.IsMatch(sql, @"\bidentified\s+(with\s+\S+\s+)?by\b", RegexOptions.IgnoreCase);
+}
+
 static void AddHistory(List<string>? history, string sql)
 {
     if (history is null)
@@ -899,6 +988,34 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
 }
 
+// Reports a failed statement: the exception, the server's error code, a caret under the offending
+// token when the message carries a location, and — for the authorization codes — the action that
+// actually fixes it, since "insufficient privilege" alone doesn't say which grant is missing.
+static void WriteStatementError(Exception ex, string? sql)
+{
+    string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
+
+    AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
+    WriteErrorCaret(sql, ex.Message);
+
+    switch (errorCode)
+    {
+        case "CADB0516":
+            AnsiConsole.MarkupLine("[grey58]Not authenticated. Start the shell with[/] [cyan]-u <user>[/] [grey58](and[/] [cyan]-p[/][grey58]), or re-run it if the token was revoked.[/]");
+            break;
+
+        case "CADB0517":
+            AnsiConsole.MarkupLine("[grey58]Authenticated, but missing a privilege on some table the statement touches. Grant it with[/] [cyan]GRANT … ON db.* TO <user>[/][grey58], as a superuser.[/]");
+            break;
+
+        case "CADB0519":
+            AnsiConsole.MarkupLine("[grey58]The server requires TLS for credential-bearing requests. Use an[/] [cyan]https://[/] [grey58]endpoint.[/]");
+            break;
+    }
+
+    AnsiConsole.WriteLine();
+}
+
 // Renders a Rust-compiler-style pointer under the offending line when the error
 // message carries a "(line N, col M)" location, e.g.:
 //
@@ -1025,17 +1142,47 @@ static bool IsSystemLevelQuery(string sql)
     string trimmedSql = sql.Trim();
 
     return trimmedSql.StartsWith("show databases", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show orphan databases", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show branches from ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase);
+           trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase);
 }
 
+// User and grant administration is server-level: like database DDL, these statements name their
+// target inside the SQL, touch only the shared auth catalog, and return no database descriptor —
+// so they run on a database-less connection and need no current database.
+static bool IsUserAdmin(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("create user ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("alter user ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop user ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("grant ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("revoke ", StringComparison.InvariantCultureIgnoreCase);
+}
+
+// Everything the server dispatches before opening a database — database lifecycle DDL plus user
+// and grant administration.
+static bool IsServerLevelDDL(string sql)
+{
+    return IsDatabaseDDL(sql) || IsUserAdmin(sql);
+}
+
+// Statements the server dispatches before opening a database (StatementScope.IsDatabaseScopedMutation):
+// they name their target inside the SQL, so they must run on a database-less connection rather than
+// being rejected for having no current database. A rename has two accepted spellings —
+// RENAME DATABASE a TO b and ALTER DATABASE a RENAME TO b — and only COMMENT ON DATABASE is
+// database-scoped; COMMENT ON TABLE/COLUMN still needs a current database.
 static bool IsDatabaseDDL(string sql)
 {
     string trimmedSql = sql.Trim();
 
     return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase);
+           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("alter database ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("comment on database ", StringComparison.InvariantCultureIgnoreCase);
 }
 
 static bool ChangesTableSet(string sql)
@@ -1050,9 +1197,7 @@ static bool IsDDL(string sql)
 {
     string trimmedSql = sql.Trim();
 
-    return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase) ||
+    return IsServerLevelDDL(trimmedSql) ||
            trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
@@ -1060,31 +1205,155 @@ static bool IsDDL(string sql)
            trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
 }
 
-static string BuildConnectionString(Options opts)
+// Default listener ports for a local server: REST on 5095, gRPC on 5096 (both enabled by default).
+const int DefaultRestPort = 5095;
+const int DefaultGrpcPort = 5096;
+
+// Builds the ordered list of connection strings to try. gRPC is preferred and REST is the
+// fallback, so a server that only speaks one of them (or has gRPC disabled) still connects.
+// When the caller pins Protocol= explicitly, that choice is honored with no fallback.
+static List<string> BuildConnectionAttempts(Options opts, string? user, string? password, string? token)
 {
     if (!string.IsNullOrEmpty(opts.ConnectionSource))
     {
-        string cs = opts.ConnectionSource;
-        bool hasDatabase = cs.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Any(p => p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase));
-        return hasDatabase ? cs : cs.TrimEnd(';') + ";Database=";
+        string cs = WithCredentials(EnsureDatabase(opts.ConnectionSource), user, password, token);
+
+        // Respect an explicit Protocol= — the user has chosen the transport deliberately.
+        if (HasKey(cs, "Protocol"))
+            return [cs];
+
+        // No protocol given: try gRPC against their endpoint, then REST against the same endpoint.
+        return [WithProtocol(cs, "grpc"), WithProtocol(cs, "rest")];
     }
 
-    return string.IsNullOrWhiteSpace(opts.Database)
-        ? "Endpoint=http://localhost:5095;Database="
-        : $"Endpoint=http://localhost:5095;Database={opts.Database}";
+    string db = opts.Database ?? "";
+
+    // No connection string at all: use the well-known local ports for each transport.
+    return
+    [
+        WithCredentials($"Endpoint=http://localhost:{DefaultGrpcPort};Database={db};Protocol=grpc", user, password, token),
+        WithCredentials($"Endpoint=http://localhost:{DefaultRestPort};Database={db};Protocol=rest", user, password, token),
+    ];
 }
 
-static string GetEndpointConnectionString(string connectionString)
+// Adds the authentication keys the driver understands. Credentials passed on the command line (or
+// in the environment) win over the same key inside -c, since they were given more deliberately;
+// anything not supplied is left untouched, so a -c that already carries them still works.
+static string WithCredentials(string connectionString, string? user, string? password, string? token)
 {
-    string? endpoint = connectionString
+    if (!string.IsNullOrEmpty(user))
+        connectionString = WithKey(connectionString, "User", user);
+
+    if (!string.IsNullOrEmpty(password))
+        connectionString = WithKey(connectionString, "Password", password);
+
+    if (!string.IsNullOrEmpty(token))
+        connectionString = WithKey(connectionString, "AccessToken", token);
+
+    return connectionString;
+}
+
+// Reads a password without echoing it. Returns null when there is no terminal to prompt on, so a
+// piped/scripted invocation fails on the server's authentication error rather than blocking here.
+static string? PromptPassword()
+{
+    if (Console.IsInputRedirected)
+        return null;
+
+    string entered = AnsiConsole.Prompt(new TextPrompt<string>("Password:").Secret().AllowEmpty());
+    return string.IsNullOrEmpty(entered) ? null : entered;
+}
+
+// Startup connection failures are the one place where a raw stack trace helps nobody: the causes
+// are few and each has a concrete fix, so name the likely one.
+static void WriteConnectionError(Exception ex)
+{
+    string code = ex is CamusException ce ? ce.Code : "";
+
+    AnsiConsole.MarkupLine("[red]Connection failed[/]{0}: {1}\n",
+        code.Length > 0 ? $" ([grey]{Markup.Escape(code)}[/])" : "",
+        Markup.Escape(ex.Message));
+
+    switch (code)
+    {
+        case "CADB0516":
+            AnsiConsole.MarkupLine("[grey58]Authentication failed. Check[/] [cyan]-u[/][grey58]/[/][cyan]-p[/][grey58], or that the user exists on this server.[/]");
+            break;
+
+        case "CADB0518":
+            AnsiConsole.MarkupLine("[grey58]Too many login attempts for this account; the server rate-limits logins per minute. Wait and retry.[/]");
+            break;
+
+        case "CADB0519":
+            AnsiConsole.MarkupLine("[grey58]The server refuses credentials over plaintext. Use an[/] [cyan]https://[/] [grey58]endpoint, or start the server with[/] [cyan]--require-tls-when-auth-enabled false[/] [grey58]when TLS terminates in front of it.[/]");
+            break;
+    }
+}
+
+// Appends an empty Database= key when the connection string doesn't already carry one.
+static string EnsureDatabase(string connectionString)
+{
+    return HasKey(connectionString, "Database")
+        ? connectionString
+        : connectionString.TrimEnd(';') + ";Database=";
+}
+
+// Returns the connection string with the given transport pinned via Protocol=, replacing any
+// existing Protocol= key.
+static string WithProtocol(string connectionString, string protocol)
+{
+    return WithKey(connectionString, "Protocol", protocol);
+}
+
+// Returns the connection string with key=value set, replacing any existing occurrence of the key.
+static string WithKey(string connectionString, string key, string value)
+{
+    List<string> parts = connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Where(p => !p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    parts.Add($"{key}={value}");
+    return string.Join(';', parts);
+}
+
+static bool HasKey(string connectionString, string key)
+{
+    return connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Any(p => p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase));
+}
+
+// Returns the value of a connection-string key, or null when the key is absent.
+static string? GetConnValue(string connectionString, string key)
+{
+    return connectionString
         .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-        .Where(p => p.Length == 2 && string.Equals(p[0], "Endpoint", StringComparison.OrdinalIgnoreCase))
+        .Where(p => p.Length == 2 && string.Equals(p[0], key, StringComparison.OrdinalIgnoreCase))
+        .Select(p => p[1])
+        .FirstOrDefault();
+}
+
+// Human-readable transport name for the resolved connection string (Protocol= defaults to REST).
+static string DescribeTransport(string connectionString)
+{
+    string? protocol = connectionString
+        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
+        .Where(p => p.Length == 2 && string.Equals(p[0], "Protocol", StringComparison.OrdinalIgnoreCase))
         .Select(p => p[1])
         .FirstOrDefault();
 
-    return $"Endpoint={endpoint ?? "http://localhost:5095"};Database=";
+    return string.Equals(protocol, "grpc", StringComparison.OrdinalIgnoreCase) ? "gRPC" : "REST";
+}
+
+// Produces a connection string for the same endpoint/transport but with no database selected,
+// used to reach system-level commands. Protocol= and Endpoint= are preserved so the transport
+// and port stay consistent with the live connection.
+static string GetEndpointConnectionString(string connectionString)
+{
+    return SwapDatabase(connectionString, "");
 }
 
 static string SwapDatabase(string connectionString, string newDatabase)
@@ -1144,8 +1413,13 @@ static void PrintHelp()
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
-    AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: Endpoint=http://localhost:5095;Database=test)");
+    AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: gRPC on http://localhost:5096,");
+    AnsiConsole.MarkupLine("                                falling back to REST on http://localhost:5095)");
     AnsiConsole.MarkupLine("  -e, --execute                 Execute a SQL statement (or ;-separated statements) and exit");
+    AnsiConsole.MarkupLine("  -u, --user                    User to authenticate as (only needed on a server with");
+    AnsiConsole.MarkupLine("                                authentication enabled)");
+    AnsiConsole.MarkupLine("  -p, --password                That user's password; prompted for when -u is given without it");
+    AnsiConsole.MarkupLine("  --token                       Use a bearer token obtained elsewhere instead of logging in");
     AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");
     AnsiConsole.MarkupLine("                                on terminals whose TERM value Spectre.Console doesn't recognize");
     AnsiConsole.MarkupLine("  --diagnose-terminal           Print terminal capabilities and exit (why rich mode is on/off)");
@@ -1154,6 +1428,9 @@ static void PrintHelp()
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Environment variables:[/]");
     AnsiConsole.MarkupLine("  CAMUS_FORCE_RICH=1            Same as [cyan]--force-rich[/] (accepts 1/true/yes)");
+    AnsiConsole.MarkupLine("  CAMUS_USER                    Default for [cyan]-u[/]");
+    AnsiConsole.MarkupLine("  CAMUS_PASSWORD                Default for [cyan]-p[/] (keeps the password out of the shell history)");
+    AnsiConsole.MarkupLine("  CAMUS_ACCESS_TOKEN            Default for [cyan]--token[/]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
     AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory|tpcc>  Create schema and seed data for a workload");
@@ -1165,10 +1442,16 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  --rows N                      Rows to generate for init (default: 1000, bank only)");
     AnsiConsole.MarkupLine("  --concurrency N               Parallel workers for run (default: 3)");
     AnsiConsole.MarkupLine("  --duration N                  Run duration in seconds (default: 60)");
+    AnsiConsole.MarkupLine("  --locking MODE                Locking mode: optimistic | pessimistic (default: optimistic)");
+    AnsiConsole.MarkupLine("  --isolation LEVEL             Isolation level: serializable | read-committed (default: serializable)");
+    AnsiConsole.MarkupLine("  -u, --user / -p, --password   Credentials for an authenticated server");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");
-    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -u app -p app-secret");
+    AnsiConsole.MarkupLine("  camus-cli mydb -u app                     [grey58](prompts for the password)[/]");
+    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
+    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
     AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
     AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
     AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
@@ -1233,4 +1516,13 @@ public sealed class Options
 
     [Option('e', "execute", Required = false, HelpText = "Execute a SQL statement (or ;-separated statements) and exit")]
     public string? Execute { get; set; }
+
+    [Option('u', "user", Required = false, HelpText = "User to authenticate as")]
+    public string? User { get; set; }
+
+    [Option('p', "password", Required = false, HelpText = "That user's password (prompted for when omitted)")]
+    public string? Password { get; set; }
+
+    [Option("token", Required = false, HelpText = "Use a bearer token obtained elsewhere instead of logging in")]
+    public string? AccessToken { get; set; }
 }

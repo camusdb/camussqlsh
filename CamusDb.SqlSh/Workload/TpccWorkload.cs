@@ -10,6 +10,7 @@ using CamusDB.Client;
 using Spectre.Console;
 using System.Diagnostics;
 using System.Globalization;
+using static WorkloadHelpers;
 
 internal static class TpccWorkload
 {
@@ -72,7 +73,7 @@ internal static class TpccWorkload
     // Init
     // -------------------------------------------------------------------------
 
-    internal static async Task InitAsync(CamusConnection conn, int warehouses)
+    internal static async Task InitAsync(CamusConnection conn, int warehouses, int concurrency, CamusTransactionOptions txOptions)
     {
         if (warehouses < 1) warehouses = 1;
 
@@ -220,16 +221,37 @@ internal static class TpccWorkload
         ];
 
         foreach (string ddl in ddls)
-            await WorkloadHelpers.DDL(conn, ddl);
+            await DDL(conn, ddl);
+
+        // Index every column the run-phase predicates filter on. Without these, an UPDATE/SELECT with a
+        // non-indexed predicate takes a [-inf,+inf] range lock on the whole table, which serializes the
+        // workers no matter how many of them there are.
+        string[] indexes =
+        [
+            "ALTER TABLE tpcc_warehouse ADD INDEX idx_w (w_id)",
+            "ALTER TABLE tpcc_district ADD INDEX idx_d (d_w_id, d_id)",
+            "ALTER TABLE tpcc_customer ADD INDEX idx_c (c_w_id, c_d_id, c_id)",
+            "ALTER TABLE tpcc_item ADD INDEX idx_i (i_id)",
+            "ALTER TABLE tpcc_stock ADD INDEX idx_s (s_w_id, s_i_id)",
+            "ALTER TABLE tpcc_orders ADD INDEX idx_o (o_w_id, o_d_id, o_c_id)",
+            "ALTER TABLE tpcc_new_order ADD INDEX idx_no (no_w_id, no_d_id)",
+            "ALTER TABLE tpcc_order_line ADD INDEX idx_ol (ol_w_id, ol_d_id, ol_o_id)",
+        ];
+
+        foreach (string index in indexes)
+        {
+            // A re-run of init hits an already-created index; that's not a failure.
+            try { await DDL(conn, index); } catch (CamusException) { }
+        }
 
         AnsiConsole.MarkupLine("[green]Schema ready.[/] Clearing existing data...");
 
         string[] tables = ["tpcc_history", "tpcc_order_line", "tpcc_new_order", "tpcc_orders",
                            "tpcc_stock", "tpcc_customer", "tpcc_item", "tpcc_district", "tpcc_warehouse"];
         foreach (string t in tables)
-            await WorkloadHelpers.Exec(conn, $"DELETE FROM {t} WHERE id IS NOT NULL");
+            await Exec(conn, $"DELETE FROM {t} WHERE id IS NOT NULL");
 
-        AnsiConsole.MarkupLine("Seeding data for [blue]{0}[/] warehouse(s)...\n", warehouses);
+        AnsiConsole.MarkupLine("Seeding data for [blue]{0}[/] warehouse(s) ([blue]{1}[/] parallel writers)...\n", warehouses, concurrency);
 
         Random rng = new(42);
         string now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
@@ -238,6 +260,120 @@ internal static class TpccWorkload
         int totalStock = totalItems * warehouses;
         int totalDistricts = DistrictsPerWarehouse * warehouses;
         int totalCustomers = CustomersPerDistrict * totalDistricts;
+
+        // Every row is generated single-threaded from a seeded RNG (Random isn't thread-safe), then the
+        // resulting statements are chunked into transactions and fanned out across `concurrency` writers.
+        List<(string Sql, Param[] Parameters)> warehouseRows = [];
+        for (int w = 1; w <= warehouses; w++)
+        {
+            warehouseRows.Add((WarehouseInsertSql,
+            [
+                ("@w_id",       ColumnType.Integer64, (object)(long)w),
+                ("@w_name",     ColumnType.String,    $"Warehouse-{w}"),
+                ("@w_street_1", ColumnType.String,    "100 Main St"),
+                ("@w_street_2", ColumnType.String,    $"Suite {w}"),
+                ("@w_city",     ColumnType.String,    "Springfield"),
+                ("@w_state",    ColumnType.String,    "ST"),
+                ("@w_zip",      ColumnType.String,    ZipCode(rng)),
+                ("@w_tax",      ColumnType.Float64,   Math.Round(rng.NextDouble() * 0.2, 4)),
+                ("@w_ytd",      ColumnType.Float64,   300000.00),
+            ]));
+        }
+
+        List<(string Sql, Param[] Parameters)> districtRows = [];
+        for (int w = 1; w <= warehouses; w++)
+        {
+            for (int d = 1; d <= DistrictsPerWarehouse; d++)
+            {
+                districtRows.Add((DistrictInsertSql,
+                [
+                    ("@d_id",        ColumnType.Integer64, (object)(long)d),
+                    ("@d_w_id",      ColumnType.Integer64, (long)w),
+                    ("@d_name",      ColumnType.String,    $"District-{d}"),
+                    ("@d_street_1",  ColumnType.String,    $"{d} Commerce Ave"),
+                    ("@d_street_2",  ColumnType.String,    ""),
+                    ("@d_city",      ColumnType.String,    "Shelbyville"),
+                    ("@d_state",     ColumnType.String,    "ST"),
+                    ("@d_zip",       ColumnType.String,    ZipCode(rng)),
+                    ("@d_tax",       ColumnType.Float64,   Math.Round(rng.NextDouble() * 0.2, 4)),
+                    ("@d_ytd",       ColumnType.Float64,   30000.00),
+                    ("@d_next_o_id", ColumnType.Integer64, 3001L),
+                ]));
+            }
+        }
+
+        List<(string Sql, Param[] Parameters)> customerRows = [];
+        for (int w = 1; w <= warehouses; w++)
+        {
+            for (int d = 1; d <= DistrictsPerWarehouse; d++)
+            {
+                for (int c = 1; c <= CustomersPerDistrict; c++)
+                {
+                    customerRows.Add((CustomerInsertSql,
+                    [
+                        ("@c_id",           ColumnType.Integer64, (object)(long)c),
+                        ("@c_d_id",         ColumnType.Integer64, (long)d),
+                        ("@c_w_id",         ColumnType.Integer64, (long)w),
+                        ("@c_first",        ColumnType.String,    FirstName(rng)),
+                        ("@c_middle",       ColumnType.String,    "OE"),
+                        ("@c_last",         ColumnType.String,    LastName(rng)),
+                        ("@c_street_1",     ColumnType.String,    $"{c} Elm St"),
+                        ("@c_street_2",     ColumnType.String,    ""),
+                        ("@c_city",         ColumnType.String,    "Capital City"),
+                        ("@c_state",        ColumnType.String,    "ST"),
+                        ("@c_zip",          ColumnType.String,    ZipCode(rng)),
+                        ("@c_phone",        ColumnType.String,    PhoneNumber(rng)),
+                        ("@c_since",        ColumnType.String,    now),
+                        ("@c_credit",       ColumnType.String,    rng.NextDouble() < 0.1 ? "BC" : "GC"),
+                        ("@c_credit_lim",   ColumnType.Float64,   50000.00),
+                        ("@c_discount",     ColumnType.Float64,   Math.Round(rng.NextDouble() * 0.5, 4)),
+                        ("@c_balance",      ColumnType.Float64,   -10.00),
+                        ("@c_ytd_payment",  ColumnType.Float64,   10.00),
+                        ("@c_payment_cnt",  ColumnType.Integer64, 1L),
+                        ("@c_delivery_cnt", ColumnType.Integer64, 0L),
+                        ("@c_data",         ColumnType.String,    ""),
+                    ]));
+                }
+            }
+        }
+
+        List<(string Sql, Param[] Parameters)> itemRows = [];
+        for (int i = 1; i <= totalItems; i++)
+        {
+            itemRows.Add((ItemInsertSql,
+            [
+                ("@i_id",    ColumnType.Integer64, (object)(long)i),
+                ("@i_im_id", ColumnType.Integer64, (long)rng.Next(1, 10001)),
+                ("@i_name",  ColumnType.String,    $"Item-{i}"),
+                ("@i_price", ColumnType.Float64,   Math.Round(1.0 + rng.NextDouble() * 99.0, 2)),
+                ("@i_data",  ColumnType.String,    rng.NextDouble() < 0.1 ? "ORIGINAL" : RandString(rng, 26, 50)),
+            ]));
+        }
+
+        List<(string Sql, Param[] Parameters)> stockRows = [];
+        for (int w = 1; w <= warehouses; w++)
+        {
+            for (int i = 1; i <= totalItems; i++)
+            {
+                stockRows.Add((StockInsertSql,
+                [
+                    ("@s_i_id",     ColumnType.Integer64, (object)(long)i),
+                    ("@s_w_id",     ColumnType.Integer64, (long)w),
+                    ("@s_quantity", ColumnType.Integer64, (long)rng.Next(10, 101)),
+                    ("@s_dist_01",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_02",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_03",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_04",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_05",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_06",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_07",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_08",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_09",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_dist_10",  ColumnType.String,    RandStr24(rng)),
+                    ("@s_data",     ColumnType.String,    rng.NextDouble() < 0.1 ? "ORIGINAL" : RandString(rng, 26, 50)),
+                ]));
+            }
+        }
 
         await AnsiConsole.Progress()
             .AutoRefresh(true)
@@ -250,166 +386,11 @@ internal static class TpccWorkload
                 ProgressTask tItm = ctx.AddTask("[green]items     [/]",  maxValue: totalItems);
                 ProgressTask tStk = ctx.AddTask("[green]stock     [/]",  maxValue: totalStock);
 
-                // warehouses
-                for (int w = 1; w <= warehouses; w++)
-                {
-                    double tax = Math.Round(rng.NextDouble() * 0.2, 4);
-                    await WorkloadHelpers.ExecWithParams(conn, WarehouseInsertSql,
-                    [
-                        ("@w_id",       ColumnType.Integer64, (object)(long)w),
-                        ("@w_name",     ColumnType.String,    $"Warehouse-{w}"),
-                        ("@w_street_1", ColumnType.String,    "100 Main St"),
-                        ("@w_street_2", ColumnType.String,    $"Suite {w}"),
-                        ("@w_city",     ColumnType.String,    "Springfield"),
-                        ("@w_state",    ColumnType.String,    "ST"),
-                        ("@w_zip",      ColumnType.String,    ZipCode(rng)),
-                        ("@w_tax",      ColumnType.Float64,   tax),
-                        ("@w_ytd",      ColumnType.Float64,   300000.00),
-                    ]);
-                    tWh.Increment(1);
-                }
-
-                // districts
-                for (int w = 1; w <= warehouses; w++)
-                {
-                    for (int d = 1; d <= DistrictsPerWarehouse; d++)
-                    {
-                        double dtax = Math.Round(rng.NextDouble() * 0.2, 4);
-                        await WorkloadHelpers.ExecWithParams(conn, DistrictInsertSql,
-                        [
-                            ("@d_id",        ColumnType.Integer64, (object)(long)d),
-                            ("@d_w_id",      ColumnType.Integer64, (long)w),
-                            ("@d_name",      ColumnType.String,    $"District-{d}"),
-                            ("@d_street_1",  ColumnType.String,    $"{d} Commerce Ave"),
-                            ("@d_street_2",  ColumnType.String,    ""),
-                            ("@d_city",      ColumnType.String,    "Shelbyville"),
-                            ("@d_state",     ColumnType.String,    "ST"),
-                            ("@d_zip",       ColumnType.String,    ZipCode(rng)),
-                            ("@d_tax",       ColumnType.Float64,   dtax),
-                            ("@d_ytd",       ColumnType.Float64,   30000.00),
-                            ("@d_next_o_id", ColumnType.Integer64, 3001L),
-                        ]);
-                        tDis.Increment(1);
-                    }
-                }
-
-                // customers — batch 10 at a time
-                var cusBatch = new List<(string sql, (string name, ColumnType type, object value)[] parms)>(BatchSize);
-                for (int w = 1; w <= warehouses; w++)
-                {
-                    for (int d = 1; d <= DistrictsPerWarehouse; d++)
-                    {
-                        for (int c = 1; c <= CustomersPerDistrict; c++)
-                        {
-                            string credit = rng.NextDouble() < 0.1 ? "BC" : "GC";
-                            double discount = Math.Round(rng.NextDouble() * 0.5, 4);
-                            cusBatch.Add((CustomerInsertSql,
-                            [
-                                ("@c_id",           ColumnType.Integer64, (object)(long)c),
-                                ("@c_d_id",         ColumnType.Integer64, (long)d),
-                                ("@c_w_id",         ColumnType.Integer64, (long)w),
-                                ("@c_first",        ColumnType.String,    FirstName(rng)),
-                                ("@c_middle",       ColumnType.String,    "OE"),
-                                ("@c_last",         ColumnType.String,    LastName(rng)),
-                                ("@c_street_1",     ColumnType.String,    $"{c} Elm St"),
-                                ("@c_street_2",     ColumnType.String,    ""),
-                                ("@c_city",         ColumnType.String,    "Capital City"),
-                                ("@c_state",        ColumnType.String,    "ST"),
-                                ("@c_zip",          ColumnType.String,    ZipCode(rng)),
-                                ("@c_phone",        ColumnType.String,    PhoneNumber(rng)),
-                                ("@c_since",        ColumnType.String,    now),
-                                ("@c_credit",       ColumnType.String,    credit),
-                                ("@c_credit_lim",   ColumnType.Float64,   50000.00),
-                                ("@c_discount",     ColumnType.Float64,   discount),
-                                ("@c_balance",      ColumnType.Float64,   -10.00),
-                                ("@c_ytd_payment",  ColumnType.Float64,   10.00),
-                                ("@c_payment_cnt",  ColumnType.Integer64, 1L),
-                                ("@c_delivery_cnt", ColumnType.Integer64, 0L),
-                                ("@c_data",         ColumnType.String,    ""),
-                            ]));
-                            tCus.Increment(1);
-
-                            if (cusBatch.Count >= BatchSize)
-                            {
-                                await RunBatch(conn, cusBatch);
-                                cusBatch.Clear();
-                            }
-                        }
-                    }
-                }
-                if (cusBatch.Count > 0)
-                {
-                    await RunBatch(conn, cusBatch);
-                    cusBatch.Clear();
-                }
-
-                // items — batch 10 at a time
-                var itmBatch = new List<(string sql, (string name, ColumnType type, object value)[] parms)>(BatchSize);
-                for (int i = 1; i <= totalItems; i++)
-                {
-                    double price = Math.Round(1.0 + rng.NextDouble() * 99.0, 2);
-                    string data = rng.NextDouble() < 0.1 ? "ORIGINAL" : RandString(rng, 26, 50);
-                    itmBatch.Add((ItemInsertSql,
-                    [
-                        ("@i_id",   ColumnType.Integer64, (object)(long)i),
-                        ("@i_im_id", ColumnType.Integer64, (long)rng.Next(1, 10001)),
-                        ("@i_name", ColumnType.String,    $"Item-{i}"),
-                        ("@i_price", ColumnType.Float64,  price),
-                        ("@i_data", ColumnType.String,    data),
-                    ]));
-                    tItm.Increment(1);
-
-                    if (itmBatch.Count >= BatchSize)
-                    {
-                        await RunBatch(conn, itmBatch);
-                        itmBatch.Clear();
-                    }
-                }
-                if (itmBatch.Count > 0)
-                {
-                    await RunBatch(conn, itmBatch);
-                    itmBatch.Clear();
-                }
-
-                // stock — batch 10 at a time, one row per (item, warehouse)
-                var stkBatch = new List<(string sql, (string name, ColumnType type, object value)[] parms)>(BatchSize);
-                for (int w = 1; w <= warehouses; w++)
-                {
-                    for (int i = 1; i <= totalItems; i++)
-                    {
-                        int qty = rng.Next(10, 101);
-                        string sdata = rng.NextDouble() < 0.1 ? "ORIGINAL" : RandString(rng, 26, 50);
-                        stkBatch.Add((StockInsertSql,
-                        [
-                            ("@s_i_id",    ColumnType.Integer64, (object)(long)i),
-                            ("@s_w_id",    ColumnType.Integer64, (long)w),
-                            ("@s_quantity", ColumnType.Integer64, (long)qty),
-                            ("@s_dist_01", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_02", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_03", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_04", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_05", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_06", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_07", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_08", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_09", ColumnType.String,    RandStr24(rng)),
-                            ("@s_dist_10", ColumnType.String,    RandStr24(rng)),
-                            ("@s_data",    ColumnType.String,    sdata),
-                        ]));
-                        tStk.Increment(1);
-
-                        if (stkBatch.Count >= BatchSize)
-                        {
-                            await RunBatch(conn, stkBatch);
-                            stkBatch.Clear();
-                        }
-                    }
-                }
-                if (stkBatch.Count > 0)
-                {
-                    await RunBatch(conn, stkBatch);
-                    stkBatch.Clear();
-                }
+                await Seed(conn, txOptions, concurrency, warehouseRows, tWh);
+                await Seed(conn, txOptions, concurrency, districtRows, tDis);
+                await Seed(conn, txOptions, concurrency, customerRows, tCus);
+                await Seed(conn, txOptions, concurrency, itemRows, tItm);
+                await Seed(conn, txOptions, concurrency, stockRows, tStk);
             });
 
         AnsiConsole.MarkupLine("\n[green]TPC-C workload initialized.[/]");
@@ -420,7 +401,7 @@ internal static class TpccWorkload
     // Run
     // -------------------------------------------------------------------------
 
-    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds)
+    internal static async Task RunAsync(CamusConnection conn, int concurrency, int durationSeconds, CamusTransactionOptions txOptions)
     {
         List<long> warehouseIds = await LoadLongColumn(conn, "tpcc_warehouse", "w_id");
         if (warehouseIds.Count == 0)
@@ -468,11 +449,11 @@ internal static class TpccWorkload
 
                     switch (txType)
                     {
-                        case 0: await TxNewOrder(conn, rng, wId, maxItemId); break;
-                        case 1: await TxPayment(conn, rng, wId); break;
-                        case 2: await TxOrderStatus(conn, rng, wId); break;
-                        case 3: await TxDelivery(conn, rng, wId); break;
-                        case 4: await TxStockLevel(conn, rng, wId); break;
+                        case 0: await TxNewOrder(conn, txOptions, rng, wId, maxItemId, cts.Token); break;
+                        case 1: await TxPayment(conn, txOptions, rng, wId, cts.Token); break;
+                        case 2: await TxOrderStatus(conn, rng, wId, cts.Token); break;
+                        case 3: await TxDelivery(conn, txOptions, rng, wId, cts.Token); break;
+                        case 4: await TxStockLevel(conn, rng, wId, cts.Token); break;
                     }
 
                     Interlocked.Increment(ref totalOps);
@@ -497,19 +478,19 @@ internal static class TpccWorkload
     // -------------------------------------------------------------------------
 
     // New-Order (~45%): insert an order with 5-15 line items
-    private static async Task TxNewOrder(CamusConnection conn, Random rng, long wId, int maxItemId)
+    private static async Task TxNewOrder(CamusConnection conn, CamusTransactionOptions txOptions, Random rng, long wId, int maxItemId, CancellationToken ct)
     {
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         long cId = rng.Next(1, CustomersPerDistrict + 1);
         int lineCount = rng.Next(5, 16);
         string entryDate = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
 
-        long oId = await FetchNextOrderId(conn, dId, wId);
-
-        CamusTransaction tx = await conn.BeginTransactionAsync();
+        CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, ct);
         try
         {
-            await WorkloadHelpers.ExecWithParams(conn, OrderInsertSql,
+            long oId = await FetchNextOrderId(conn, tx, dId, wId, ct);
+
+            await ExecWithParams(conn, OrderInsertSql,
             [
                 ("@o_id",        ColumnType.Integer64, (object)oId),
                 ("@o_d_id",      ColumnType.Integer64, dId),
@@ -519,21 +500,21 @@ internal static class TpccWorkload
                 ("@o_carrier_id", ColumnType.Integer64, 0L),
                 ("@o_ol_cnt",    ColumnType.Integer64, (long)lineCount),
                 ("@o_all_local", ColumnType.Integer64, 1L),
-            ], tx);
+            ], tx, ct);
 
-            await WorkloadHelpers.ExecWithParams(conn, NewOrderInsertSql,
+            await ExecWithParams(conn, NewOrderInsertSql,
             [
                 ("@no_o_id", ColumnType.Integer64, (object)oId),
                 ("@no_d_id", ColumnType.Integer64, dId),
                 ("@no_w_id", ColumnType.Integer64, wId),
-            ], tx);
+            ], tx, ct);
 
-            await WorkloadHelpers.ExecWithParams(conn,
+            await ExecWithParams(conn,
                 "UPDATE tpcc_district SET d_next_o_id = d_next_o_id + 1 WHERE d_id = @d_id AND d_w_id = @d_w_id",
             [
                 ("@d_id",   ColumnType.Integer64, (object)dId),
                 ("@d_w_id", ColumnType.Integer64, wId),
-            ], tx);
+            ], tx, ct);
 
             for (int ol = 1; ol <= lineCount; ol++)
             {
@@ -541,7 +522,7 @@ internal static class TpccWorkload
                 int qty = rng.Next(1, 11);
                 double amount = Math.Round(qty * (1.0 + rng.NextDouble() * 99.0), 2);
 
-                await WorkloadHelpers.ExecWithParams(conn, OrderLineInsertSql,
+                await ExecWithParams(conn, OrderLineInsertSql,
                 [
                     ("@ol_o_id",       ColumnType.Integer64, (object)oId),
                     ("@ol_d_id",       ColumnType.Integer64, dId),
@@ -551,19 +532,19 @@ internal static class TpccWorkload
                     ("@ol_supply_w_id", ColumnType.Integer64, wId),
                     ("@ol_quantity",   ColumnType.Integer64, (long)qty),
                     ("@ol_amount",     ColumnType.Float64,   amount),
-                ], tx);
+                ], tx, ct);
 
-                await WorkloadHelpers.ExecWithParams(conn,
+                await ExecWithParams(conn,
                     "UPDATE tpcc_stock SET s_quantity = s_quantity - @qty, s_order_cnt = s_order_cnt + 1 " +
                     "WHERE s_i_id = @i_id AND s_w_id = @w_id AND s_quantity >= @qty",
                 [
                     ("@qty",  ColumnType.Integer64, (object)(long)qty),
                     ("@i_id", ColumnType.Integer64, iId),
                     ("@w_id", ColumnType.Integer64, wId),
-                ], tx);
+                ], tx, ct);
             }
 
-            await tx.CommitAsync();
+            await tx.CommitAsync(ct);
         }
         catch
         {
@@ -573,32 +554,32 @@ internal static class TpccWorkload
     }
 
     // Payment (~43%): update customer balance and district/warehouse YTD
-    private static async Task TxPayment(CamusConnection conn, Random rng, long wId)
+    private static async Task TxPayment(CamusConnection conn, CamusTransactionOptions txOptions, Random rng, long wId, CancellationToken ct)
     {
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         long cId = rng.Next(1, CustomersPerDistrict + 1);
         double amount = Math.Round(1.0 + rng.NextDouble() * 4999.0, 2);
         string date = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
 
-        CamusTransaction tx = await conn.BeginTransactionAsync();
+        CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, ct);
         try
         {
-            await WorkloadHelpers.ExecWithParams(conn,
+            await ExecWithParams(conn,
                 "UPDATE tpcc_warehouse SET w_ytd = w_ytd + @amount WHERE w_id = @w_id",
             [
                 ("@amount", ColumnType.Float64,   (object)amount),
                 ("@w_id",   ColumnType.Integer64, wId),
-            ], tx);
+            ], tx, ct);
 
-            await WorkloadHelpers.ExecWithParams(conn,
+            await ExecWithParams(conn,
                 "UPDATE tpcc_district SET d_ytd = d_ytd + @amount WHERE d_id = @d_id AND d_w_id = @d_w_id",
             [
                 ("@amount", ColumnType.Float64,   (object)amount),
                 ("@d_id",   ColumnType.Integer64, dId),
                 ("@d_w_id", ColumnType.Integer64, wId),
-            ], tx);
+            ], tx, ct);
 
-            await WorkloadHelpers.ExecWithParams(conn,
+            await ExecWithParams(conn,
                 "UPDATE tpcc_customer SET c_balance = c_balance - @amount, c_ytd_payment = c_ytd_payment + @amount, " +
                 "c_payment_cnt = c_payment_cnt + 1 WHERE c_id = @c_id AND c_d_id = @c_d_id AND c_w_id = @c_w_id",
             [
@@ -606,9 +587,9 @@ internal static class TpccWorkload
                 ("@c_id",   ColumnType.Integer64, cId),
                 ("@c_d_id", ColumnType.Integer64, dId),
                 ("@c_w_id", ColumnType.Integer64, wId),
-            ], tx);
+            ], tx, ct);
 
-            await WorkloadHelpers.ExecWithParams(conn, HistoryInsertSql,
+            await ExecWithParams(conn, HistoryInsertSql,
             [
                 ("@h_c_id",   ColumnType.Integer64, (object)cId),
                 ("@h_c_d_id", ColumnType.Integer64, dId),
@@ -618,9 +599,9 @@ internal static class TpccWorkload
                 ("@h_date",   ColumnType.String,    date),
                 ("@h_amount", ColumnType.Float64,   amount),
                 ("@h_data",   ColumnType.String,    "payment"),
-            ], tx);
+            ], tx, ct);
 
-            await tx.CommitAsync();
+            await tx.CommitAsync(ct);
         }
         catch
         {
@@ -630,7 +611,7 @@ internal static class TpccWorkload
     }
 
     // Order-Status (~4%): look up a customer's most recent order
-    private static async Task TxOrderStatus(CamusConnection conn, Random rng, long wId)
+    private static async Task TxOrderStatus(CamusConnection conn, Random rng, long wId, CancellationToken ct)
     {
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         long cId = rng.Next(1, CustomersPerDistrict + 1);
@@ -642,27 +623,27 @@ internal static class TpccWorkload
         cmd.Parameters.Add("@d_id", ColumnType.Integer64, dId);
         cmd.Parameters.Add("@c_id", ColumnType.Integer64, cId);
         cmd.CommandTimeout = 30;
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync()) { /* consume */ }
+        CamusDataReader reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct)) { /* consume */ }
     }
 
     // Delivery (~4%): deliver the oldest new-order in each district for the warehouse
-    private static async Task TxDelivery(CamusConnection conn, Random rng, long wId)
+    private static async Task TxDelivery(CamusConnection conn, CamusTransactionOptions txOptions, Random rng, long wId, CancellationToken ct)
     {
         int carrierId = rng.Next(1, 11);
         string deliveryDate = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
 
-        for (int d = 1; d <= DistrictsPerWarehouse; d++)
+        for (int d = 1; d <= DistrictsPerWarehouse && !ct.IsCancellationRequested; d++)
         {
             using CamusCommand findCmd = conn.CreateSelectCommand(
                 "SELECT no_o_id FROM tpcc_new_order WHERE no_w_id = @w_id AND no_d_id = @d_id");
             findCmd.Parameters.Add("@w_id", ColumnType.Integer64, wId);
             findCmd.Parameters.Add("@d_id", ColumnType.Integer64, (long)d);
             findCmd.CommandTimeout = 30;
-            CamusDataReader findReader = await findCmd.ExecuteReaderAsync();
+            CamusDataReader findReader = await findCmd.ExecuteReaderAsync(ct);
 
             long? minOId = null;
-            while (await findReader.ReadAsync())
+            while (await findReader.ReadAsync(ct))
             {
                 Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(findReader);
                 if (row.TryGetValue("no_o_id", out ColumnValue v))
@@ -675,36 +656,36 @@ internal static class TpccWorkload
 
             if (minOId is null) continue;
 
-            CamusTransaction tx = await conn.BeginTransactionAsync();
+            CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, ct);
             try
             {
-                await WorkloadHelpers.ExecWithParams(conn,
+                await ExecWithParams(conn,
                     "DELETE FROM tpcc_new_order WHERE no_o_id = @no_o_id AND no_d_id = @d_id AND no_w_id = @w_id",
                 [
                     ("@no_o_id", ColumnType.Integer64, (object)minOId.Value),
                     ("@d_id",    ColumnType.Integer64, (long)d),
                     ("@w_id",    ColumnType.Integer64, wId),
-                ], tx);
+                ], tx, ct);
 
-                await WorkloadHelpers.ExecWithParams(conn,
+                await ExecWithParams(conn,
                     "UPDATE tpcc_orders SET o_carrier_id = @carrier_id WHERE o_id = @o_id AND o_d_id = @d_id AND o_w_id = @w_id",
                 [
                     ("@carrier_id", ColumnType.Integer64, (object)(long)carrierId),
                     ("@o_id",       ColumnType.Integer64, minOId.Value),
                     ("@d_id",       ColumnType.Integer64, (long)d),
                     ("@w_id",       ColumnType.Integer64, wId),
-                ], tx);
+                ], tx, ct);
 
-                await WorkloadHelpers.ExecWithParams(conn,
+                await ExecWithParams(conn,
                     "UPDATE tpcc_order_line SET ol_delivery_d = @delivery_d WHERE ol_o_id = @o_id AND ol_d_id = @d_id AND ol_w_id = @w_id",
                 [
                     ("@delivery_d", ColumnType.String,    (object)deliveryDate),
                     ("@o_id",       ColumnType.Integer64, minOId.Value),
                     ("@d_id",       ColumnType.Integer64, (long)d),
                     ("@w_id",       ColumnType.Integer64, wId),
-                ], tx);
+                ], tx, ct);
 
-                await tx.CommitAsync();
+                await tx.CommitAsync(ct);
             }
             catch
             {
@@ -714,7 +695,7 @@ internal static class TpccWorkload
     }
 
     // Stock-Level (~4%): count items below threshold in recent orders of a district
-    private static async Task TxStockLevel(CamusConnection conn, Random rng, long wId)
+    private static async Task TxStockLevel(CamusConnection conn, Random rng, long wId, CancellationToken ct)
     {
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         int threshold = rng.Next(10, 21);
@@ -724,42 +705,42 @@ internal static class TpccWorkload
         cmd.Parameters.Add("@w_id",      ColumnType.Integer64, wId);
         cmd.Parameters.Add("@threshold", ColumnType.Integer64, (long)threshold);
         cmd.CommandTimeout = 30;
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        CamusDataReader reader = await cmd.ExecuteReaderAsync(ct);
         int count = 0;
-        while (await reader.ReadAsync()) count++;
+        while (await reader.ReadAsync(ct)) count++;
     }
 
     // -------------------------------------------------------------------------
     // Helpers
     // -------------------------------------------------------------------------
 
-    private static async Task RunBatch(
+    /// <summary>Chunks a table's rows into transactions and runs them with `concurrency` writers in flight.</summary>
+    private static Task Seed(
         CamusConnection conn,
-        List<(string sql, (string name, ColumnType type, object value)[] parms)> batch)
+        CamusTransactionOptions txOptions,
+        int concurrency,
+        List<(string Sql, Param[] Parameters)> statements,
+        ProgressTask progress)
     {
-        CamusTransaction tx = await conn.BeginTransactionAsync();
-        try
+        return ForEachAsync(Chunk(statements, BatchSize), concurrency, async batch =>
         {
-            foreach (var (sql, parms) in batch)
-                await WorkloadHelpers.ExecWithParams(conn, sql, parms, tx);
-            await tx.CommitAsync();
-        }
-        catch
-        {
-            try { await tx.RollbackAsync(); } catch { }
-            throw;
-        }
+            await RunSeedBatch(conn, txOptions, batch);
+            progress.Increment(batch.Count);
+        });
     }
 
-    private static async Task<long> FetchNextOrderId(CamusConnection conn, long dId, long wId)
+    // Read inside the caller's transaction so the value the order uses is the one the transaction's
+    // own d_next_o_id increment is validated against.
+    private static async Task<long> FetchNextOrderId(CamusConnection conn, CamusTransaction tx, long dId, long wId, CancellationToken ct)
     {
         using CamusCommand cmd = conn.CreateSelectCommand(
             "SELECT d_next_o_id FROM tpcc_district WHERE d_id = @d_id AND d_w_id = @d_w_id");
+        cmd.Transaction = tx;
         cmd.Parameters.Add("@d_id",   ColumnType.Integer64, dId);
         cmd.Parameters.Add("@d_w_id", ColumnType.Integer64, wId);
         cmd.CommandTimeout = 30;
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
-        while (await reader.ReadAsync())
+        CamusDataReader reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
         {
             Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
             if (row.TryGetValue("d_next_o_id", out ColumnValue v))
