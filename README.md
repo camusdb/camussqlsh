@@ -1,6 +1,6 @@
 # CamusDB SQL Shell
 
-`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive `-e`/`--execute` mode for running SQL and exiting.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive mode for running SQL (`-e`/`--execute`) or a whole `.sql` file (`-f`/`--file`) and exiting.
 
 ## Installation
 
@@ -116,6 +116,7 @@ camus-cli [database] [options]
 | `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
 | `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
 | `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
+| `-f`, `--file` | Execute the statements in a `.sql` file and exit, stopping at the first error. Use `-f -` to read the script from standard input. See [Running a .sql File](#running-a-sql-file). |
 | `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
 | `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). |
 | `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
@@ -188,6 +189,40 @@ Run SQL from a file:
 source ./schema.sql
 ```
 
+### Prepared statements
+
+The driver registers a statement with the server once it has seen the same SQL a couple of
+times, and runs it prepared from then on. Nothing has to be enabled, and a prepared
+execution returns exactly what an inline one does.
+
+`show prepared` reports what is currently registered:
+
+```text
+camus> show prepared
+Prepared statements: 1 (MaxAutoPrepare=128, AutoPrepareMinUsages=2)
+  prepared     select id from robots where year = 1984
+(the statement you ran last)
+```
+
+Pass a statement to ask about that one instead of the last one you ran:
+
+```sql
+show prepared select id from robots where year = 1984
+```
+
+`\prepared` is an alias for both forms.
+
+Typed statements usually report as `inline`: they carry their values in the SQL text, so
+each execution is distinct text and never repeats often enough to be registered. The
+statements that do get prepared are the ones a `source` file or an application repeats
+verbatim. Both thresholds come from the connection string — `MaxAutoPrepare=` (how many
+statements stay registered; `0` turns registration off) and `AutoPrepareMinUsages=` (how
+many executions come first):
+
+```shell
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=demo;MaxAutoPrepare=512;AutoPrepareMinUsages=1"
+```
+
 ## Non-Interactive Execution
 
 Pass `-e` (or `--execute`) with a SQL string to run it immediately and exit, without
@@ -222,6 +257,37 @@ and piping like any other command:
 
 ```shell
 $ camus-cli demo -e "select * from users" > users.txt
+```
+
+### Running a .sql File
+
+Pass `-f` (or `--file`) with a path to run every statement in a `.sql` file and exit, so a
+schema or a migration can be applied without opening the interactive console:
+
+```shell
+$ camus-cli northwind -f schema.sql
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -f seed.sql
+```
+
+Statements are separated by semicolons and run in order, and `\G` and comments are handled
+exactly as with `source` inside the shell. Execution stops at the first statement that
+fails: the error is printed with the offending statement, the remaining statements are left
+unrun, and the process exits with status `1`.
+
+Use `-` as the path to read the script from standard input:
+
+```shell
+$ cat schema.sql | camus-cli northwind -f -
+$ camus-cli northwind -f - <<'SQL'
+create table users (id oid primary key, name string);
+insert into users values (gen_id(), 'Ada');
+SQL
+```
+
+`-f` and `-e` can be combined; the file runs first, so `-e` can read back what it wrote:
+
+```shell
+$ camus-cli demo -f seed.sql -e "select count(*) from users"
 ```
 
 ## Multiline Input

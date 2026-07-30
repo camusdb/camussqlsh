@@ -25,6 +25,13 @@ internal static class BankWorkload
     private const string DebitSql = "UPDATE accounts SET balance = balance - @amount WHERE id = @id";
     private const string CreditSql = "UPDATE accounts SET balance = balance + @amount WHERE id = @id";
 
+    /// <summary>
+    /// Every statement the <c>run</c> phase issues, for the prepared-statement warm-up. Keep in sync
+    /// with <see cref="RunAsync"/>: a statement missing here isn't broken, it just pays the driver's
+    /// usual two-execution warm-up instead of being registered before the clock starts.
+    /// </summary>
+    internal static IReadOnlyList<string> RunStatements => [DebitSql, CreditSql, TransferInsertSql];
+
     internal static async Task InitAsync(CamusConnection conn, int rows, int concurrency, CamusTransactionOptions txOptions)
     {
         AnsiConsole.MarkupLine("[cyan]Creating bank schema...[/]");

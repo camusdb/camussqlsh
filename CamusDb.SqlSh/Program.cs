@@ -68,6 +68,21 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
+// -e and -f both run SQL and exit; the shell never prompts in that case, so it also keeps stdout
+// clean of the connection banner. "-f -" reads the script from standard input, so a heredoc or a
+// pipe works the same as a file on disk.
+bool readScriptFromStdin = opts.File == "-";
+bool nonInteractive = !string.IsNullOrWhiteSpace(opts.Execute) || !string.IsNullOrWhiteSpace(opts.File);
+
+// Checked before connecting: a typo in the path shouldn't cost a round trip or look like a
+// server problem.
+if (!string.IsNullOrWhiteSpace(opts.File) && !readScriptFromStdin && !File.Exists(opts.File))
+{
+    AnsiConsole.MarkupLine("[red]File not found: {0}[/]", Markup.Escape(opts.File));
+    Environment.ExitCode = 1;
+    return;
+}
+
 if (diagnoseTerminal)
 {
     Capabilities caps = AnsiConsole.Console.Profile.Capabilities;
@@ -140,8 +155,8 @@ catch (Exception ex)
     return;
 }
 
-// Tell the user where and how they connected, unless they're scripting with -e (keep stdout clean).
-if (string.IsNullOrWhiteSpace(opts.Execute))
+// Tell the user where and how they connected, unless they're scripting with -e/-f (keep stdout clean).
+if (!nonInteractive)
 {
     string server = GetConnValue(activeConnectionString, "Endpoint") ?? "unknown server";
     string database = GetConnValue(activeConnectionString, "Database") is { Length: > 0 } db
@@ -167,15 +182,47 @@ SqlCompletion? sqlCompletion = null;
 // Non-interactive mode: run the supplied SQL, then exit. A failure here has no prompt to return
 // to, so report it the way the interactive loop does — a diagnosable line, not a stack trace —
 // and exit non-zero so a caller can tell the statement didn't run.
-if (!string.IsNullOrWhiteSpace(opts.Execute))
+if (nonInteractive)
 {
+    // A script runs before -e, so `-f schema.sql -e "select ..."` reads back what the script wrote.
+    string? script = null;
+    if (!string.IsNullOrWhiteSpace(opts.File))
+    {
+        script = readScriptFromStdin
+            ? await Console.In.ReadToEndAsync()
+            : await File.ReadAllTextAsync(opts.File);
+    }
+
+    // The statement that was running when things failed, so the error can point at it rather than
+    // at the whole file.
+    string? failedSql = null;
+
     try
     {
-        await ExecuteSql(connection, opts.Execute);
+        if (script is not null)
+        {
+            // Statements run one at a time (rather than handing the whole file to ExecuteSql) so a
+            // failure can name the offending statement and stop the script there, leaving the rest
+            // unrun instead of pressing on against a half-applied schema.
+            foreach ((string sql, bool vertical) in EscapeStringIntoLines(NormalizeSmartQuotes(script)))
+            {
+                if (string.IsNullOrWhiteSpace(sql))
+                    continue;
+
+                failedSql = sql;
+                await ExecuteSql(connection, vertical ? sql + "\\G" : sql);
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(opts.Execute))
+        {
+            failedSql = opts.Execute;
+            await ExecuteSql(connection, opts.Execute);
+        }
     }
     catch (Exception ex)
     {
-        WriteStatementError(ex, opts.Execute);
+        WriteStatementError(ex, failedSql);
         Environment.ExitCode = 1;
     }
 
@@ -493,6 +540,9 @@ if (sqlCompletion is not null && HasDatabase(activeConnectionString))
 
 StringBuilder pendingSql = new();
 
+// The last statement handed to the server, for `show prepared` to report on.
+string? lastExecutedSql = null;
+
 // Deliver Ctrl+C to the line editor as input instead of killing the process, so the editor can
 // clear a non-empty prompt on the first press and only exit when the prompt is already empty.
 if (editor is not null)
@@ -562,6 +612,14 @@ while (true)
             continue;
         }
 
+        // Handled here rather than sent on: preparation is a client-side decision, so only the driver
+        // knows the answer. Takes `show prepared` before the server can see it as a SHOW statement.
+        if (pendingSql.Length == 0 && IsShowPrepared(sqlTrim, out string? preparedArg))
+        {
+            ShowPrepared(activeConnectionString, preparedArg ?? lastExecutedSql, explicitSql: preparedArg is not null);
+            continue;
+        }
+
         if (pendingSql.Length == 0 && sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
         {
             await LoadSource(connection, sqlTrim[7..].Trim());
@@ -606,6 +664,7 @@ while (true)
 
         pendingSql.Clear();
         lastSql = executableSql;
+        lastExecutedSql = executableSql;
 
         // Add some history. A statement carrying a plaintext password (CREATE/ALTER USER … IDENTIFIED
         // BY '…') stays in the in-memory editor history — recalling it with Up is useful — but is kept
@@ -1128,6 +1187,80 @@ static bool IsQueryable(string sql)
            trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
 }
 
+// Recognizes the shell's own `show prepared` / `\prepared` command, optionally followed by the
+// statement to ask about instead of the last one executed.
+static bool IsShowPrepared(string sql, out string? statement)
+{
+    statement = null;
+    string trimmed = sql.Trim().TrimEnd(';').TrimEnd();
+
+    string[] prefixes = ["show prepared", "\\prepared"];
+    foreach (string prefix in prefixes)
+    {
+        if (!trimmed.StartsWith(prefix, StringComparison.InvariantCultureIgnoreCase))
+            continue;
+
+        string rest = trimmed[prefix.Length..];
+
+        // "show preparedfoo" is not this command; a bare prefix or one followed by SQL is.
+        if (rest.Length > 0 && !char.IsWhiteSpace(rest[0]))
+            continue;
+
+        rest = rest.Trim();
+        statement = rest.Length > 0 ? rest : null;
+        return true;
+    }
+
+    return false;
+}
+
+// Reports what the driver currently keeps prepared. The count is shared per deployment and
+// settings rather than per connection, so it survives `use` and outlives any one connection.
+static void ShowPrepared(string connectionString, string? sql, bool explicitSql)
+{
+    CamusConnectionStringBuilder builder = new(connectionString);
+
+    AnsiConsole.MarkupLine(
+        "Prepared statements: [blue]{0}[/] [grey58](MaxAutoPrepare={1}, AutoPrepareMinUsages={2})[/]",
+        builder.PreparedStatementCount, builder.MaxAutoPrepare, builder.AutoPrepareMinUsages);
+
+    if (builder.MaxAutoPrepare == 0)
+        AnsiConsole.MarkupLine("[yellow]Automatic preparation is off[/] [grey58](MaxAutoPrepare=0 in the connection string).[/]");
+
+    if (sql is null)
+    {
+        AnsiConsole.MarkupLine("[grey58]Run a statement, or pass one to check: [/][cyan]show prepared SELECT ...[/]\n");
+        return;
+    }
+
+    foreach ((string statement, bool _) in EscapeStringIntoLines(sql))
+    {
+        if (string.IsNullOrWhiteSpace(statement))
+            continue;
+
+        // Typed statements carry their values inline, so the text differs on every execution and
+        // never repeats often enough to be registered — which is what this usually reports.
+        bool prepared = builder.IsPrepared(statement);
+
+        AnsiConsole.MarkupLine(
+            prepared ? "  [green]prepared[/]     {0}" : "  [grey58]inline[/]       {0}",
+            Markup.Escape(Abbreviate(statement)));
+    }
+
+    if (!explicitSql)
+        AnsiConsole.MarkupLine("[grey58](the statement you ran last)[/]");
+
+    AnsiConsole.WriteLine();
+}
+
+// Collapses a statement onto one line for display, clipping anything past `max` characters.
+static string Abbreviate(string sql, int max = 90)
+{
+    string oneLine = Regex.Replace(sql.Trim(), @"\s+", " ");
+
+    return oneLine.Length <= max ? oneLine : oneLine[..(max - 1)] + "…";
+}
+
 static bool HasDatabase(string connectionString)
 {
     return connectionString
@@ -1416,6 +1549,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: gRPC on http://localhost:5096,");
     AnsiConsole.MarkupLine("                                falling back to REST on http://localhost:5095)");
     AnsiConsole.MarkupLine("  -e, --execute                 Execute a SQL statement (or ;-separated statements) and exit");
+    AnsiConsole.MarkupLine("  -f, --file                    Execute the statements in a .sql file and exit; stops at the");
+    AnsiConsole.MarkupLine("                                first error. Use [cyan]-f -[/] to read the script from standard input");
     AnsiConsole.MarkupLine("  -u, --user                    User to authenticate as (only needed on a server with");
     AnsiConsole.MarkupLine("                                authentication enabled)");
     AnsiConsole.MarkupLine("  -p, --password                That user's password; prompted for when -u is given without it");
@@ -1444,7 +1579,16 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  --duration N                  Run duration in seconds (default: 60)");
     AnsiConsole.MarkupLine("  --locking MODE                Locking mode: optimistic | pessimistic (default: optimistic)");
     AnsiConsole.MarkupLine("  --isolation LEVEL             Isolation level: serializable | read-committed (default: serializable)");
+    AnsiConsole.MarkupLine("  --no-prepare                  Run statements inline instead of preparing them, to measure");
+    AnsiConsole.MarkupLine("                                against the default prepared path");
     AnsiConsole.MarkupLine("  -u, --user / -p, --password   Credentials for an authenticated server");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Shell commands:[/]");
+    AnsiConsole.MarkupLine("  [cyan]use[/] <database>              Switch the current database");
+    AnsiConsole.MarkupLine("  [cyan]source[/] <file>               Run the statements in a file");
+    AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
+    AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
+    AnsiConsole.MarkupLine("  [cyan]clear[/] / [cyan]exit[/] / [cyan]quit[/]         Clear the screen / leave the shell");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");
@@ -1453,6 +1597,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
     AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -f schema.sql");
+    AnsiConsole.MarkupLine("  cat schema.sql | camus-cli mydb -f -");
     AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
     AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
@@ -1516,6 +1662,9 @@ public sealed class Options
 
     [Option('e', "execute", Required = false, HelpText = "Execute a SQL statement (or ;-separated statements) and exit")]
     public string? Execute { get; set; }
+
+    [Option('f', "file", Required = false, HelpText = "Execute the statements in a .sql file and exit (- reads standard input)")]
+    public string? File { get; set; }
 
     [Option('u', "user", Required = false, HelpText = "User to authenticate as")]
     public string? User { get; set; }

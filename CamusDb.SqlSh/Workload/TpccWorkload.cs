@@ -69,6 +69,59 @@ internal static class TpccWorkload
         "INSERT INTO tpcc_history (id, h_c_id, h_c_d_id, h_c_w_id, h_d_id, h_w_id, h_date, h_amount, h_data) " +
         "VALUES (GEN_ID(), @h_c_id, @h_c_d_id, @h_c_w_id, @h_d_id, @h_w_id, @h_date, @h_amount, @h_data)";
 
+    private const string NextOrderIdSql =
+        "SELECT d_next_o_id FROM tpcc_district WHERE d_id = @d_id AND d_w_id = @d_w_id";
+
+    private const string BumpNextOrderIdSql =
+        "UPDATE tpcc_district SET d_next_o_id = d_next_o_id + 1 WHERE d_id = @d_id AND d_w_id = @d_w_id";
+
+    private const string StockDecrementSql =
+        "UPDATE tpcc_stock SET s_quantity = s_quantity - @qty, s_order_cnt = s_order_cnt + 1 " +
+        "WHERE s_i_id = @i_id AND s_w_id = @w_id AND s_quantity >= @qty";
+
+    private const string WarehouseYtdSql =
+        "UPDATE tpcc_warehouse SET w_ytd = w_ytd + @amount WHERE w_id = @w_id";
+
+    private const string DistrictYtdSql =
+        "UPDATE tpcc_district SET d_ytd = d_ytd + @amount WHERE d_id = @d_id AND d_w_id = @d_w_id";
+
+    private const string CustomerPaymentSql =
+        "UPDATE tpcc_customer SET c_balance = c_balance - @amount, c_ytd_payment = c_ytd_payment + @amount, " +
+        "c_payment_cnt = c_payment_cnt + 1 WHERE c_id = @c_id AND c_d_id = @c_d_id AND c_w_id = @c_w_id";
+
+    private const string OrderStatusSql =
+        "SELECT o_id, o_entry_d, o_carrier_id FROM tpcc_orders " +
+        "WHERE o_w_id = @w_id AND o_d_id = @d_id AND o_c_id = @c_id";
+
+    private const string OldestNewOrderSql =
+        "SELECT no_o_id FROM tpcc_new_order WHERE no_w_id = @w_id AND no_d_id = @d_id";
+
+    private const string NewOrderDeleteSql =
+        "DELETE FROM tpcc_new_order WHERE no_o_id = @no_o_id AND no_d_id = @d_id AND no_w_id = @w_id";
+
+    private const string OrderCarrierSql =
+        "UPDATE tpcc_orders SET o_carrier_id = @carrier_id WHERE o_id = @o_id AND o_d_id = @d_id AND o_w_id = @w_id";
+
+    private const string OrderLineDeliverySql =
+        "UPDATE tpcc_order_line SET ol_delivery_d = @delivery_d WHERE ol_o_id = @o_id AND ol_d_id = @d_id AND ol_w_id = @w_id";
+
+    private const string StockLevelSql =
+        "SELECT s_i_id, s_quantity FROM tpcc_stock WHERE s_w_id = @w_id AND s_quantity < @threshold";
+
+    /// <summary>
+    /// Every statement the <c>run</c> phase issues, for the prepared-statement warm-up. Keep in sync
+    /// with the transaction bodies below: a statement missing here isn't broken, it just pays the
+    /// driver's usual two-execution warm-up instead of being registered before the clock starts.
+    /// </summary>
+    internal static IReadOnlyList<string> RunStatements =>
+    [
+        NextOrderIdSql, OrderInsertSql, NewOrderInsertSql, BumpNextOrderIdSql, OrderLineInsertSql, StockDecrementSql,
+        WarehouseYtdSql, DistrictYtdSql, CustomerPaymentSql, HistoryInsertSql,
+        OrderStatusSql,
+        OldestNewOrderSql, NewOrderDeleteSql, OrderCarrierSql, OrderLineDeliverySql,
+        StockLevelSql,
+    ];
+
     // -------------------------------------------------------------------------
     // Init
     // -------------------------------------------------------------------------
@@ -509,8 +562,7 @@ internal static class TpccWorkload
                 ("@no_w_id", ColumnType.Integer64, wId),
             ], tx, ct);
 
-            await ExecWithParams(conn,
-                "UPDATE tpcc_district SET d_next_o_id = d_next_o_id + 1 WHERE d_id = @d_id AND d_w_id = @d_w_id",
+            await ExecWithParams(conn, BumpNextOrderIdSql,
             [
                 ("@d_id",   ColumnType.Integer64, (object)dId),
                 ("@d_w_id", ColumnType.Integer64, wId),
@@ -534,9 +586,7 @@ internal static class TpccWorkload
                     ("@ol_amount",     ColumnType.Float64,   amount),
                 ], tx, ct);
 
-                await ExecWithParams(conn,
-                    "UPDATE tpcc_stock SET s_quantity = s_quantity - @qty, s_order_cnt = s_order_cnt + 1 " +
-                    "WHERE s_i_id = @i_id AND s_w_id = @w_id AND s_quantity >= @qty",
+                await ExecWithParams(conn, StockDecrementSql,
                 [
                     ("@qty",  ColumnType.Integer64, (object)(long)qty),
                     ("@i_id", ColumnType.Integer64, iId),
@@ -564,24 +614,20 @@ internal static class TpccWorkload
         CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, ct);
         try
         {
-            await ExecWithParams(conn,
-                "UPDATE tpcc_warehouse SET w_ytd = w_ytd + @amount WHERE w_id = @w_id",
+            await ExecWithParams(conn, WarehouseYtdSql,
             [
                 ("@amount", ColumnType.Float64,   (object)amount),
                 ("@w_id",   ColumnType.Integer64, wId),
             ], tx, ct);
 
-            await ExecWithParams(conn,
-                "UPDATE tpcc_district SET d_ytd = d_ytd + @amount WHERE d_id = @d_id AND d_w_id = @d_w_id",
+            await ExecWithParams(conn, DistrictYtdSql,
             [
                 ("@amount", ColumnType.Float64,   (object)amount),
                 ("@d_id",   ColumnType.Integer64, dId),
                 ("@d_w_id", ColumnType.Integer64, wId),
             ], tx, ct);
 
-            await ExecWithParams(conn,
-                "UPDATE tpcc_customer SET c_balance = c_balance - @amount, c_ytd_payment = c_ytd_payment + @amount, " +
-                "c_payment_cnt = c_payment_cnt + 1 WHERE c_id = @c_id AND c_d_id = @c_d_id AND c_w_id = @c_w_id",
+            await ExecWithParams(conn, CustomerPaymentSql,
             [
                 ("@amount", ColumnType.Float64,   (object)amount),
                 ("@c_id",   ColumnType.Integer64, cId),
@@ -616,9 +662,7 @@ internal static class TpccWorkload
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         long cId = rng.Next(1, CustomersPerDistrict + 1);
 
-        using CamusCommand cmd = conn.CreateSelectCommand(
-            "SELECT o_id, o_entry_d, o_carrier_id FROM tpcc_orders " +
-            "WHERE o_w_id = @w_id AND o_d_id = @d_id AND o_c_id = @c_id");
+        using CamusCommand cmd = conn.CreateSelectCommand(OrderStatusSql);
         cmd.Parameters.Add("@w_id", ColumnType.Integer64, wId);
         cmd.Parameters.Add("@d_id", ColumnType.Integer64, dId);
         cmd.Parameters.Add("@c_id", ColumnType.Integer64, cId);
@@ -635,8 +679,7 @@ internal static class TpccWorkload
 
         for (int d = 1; d <= DistrictsPerWarehouse && !ct.IsCancellationRequested; d++)
         {
-            using CamusCommand findCmd = conn.CreateSelectCommand(
-                "SELECT no_o_id FROM tpcc_new_order WHERE no_w_id = @w_id AND no_d_id = @d_id");
+            using CamusCommand findCmd = conn.CreateSelectCommand(OldestNewOrderSql);
             findCmd.Parameters.Add("@w_id", ColumnType.Integer64, wId);
             findCmd.Parameters.Add("@d_id", ColumnType.Integer64, (long)d);
             findCmd.CommandTimeout = 30;
@@ -659,16 +702,14 @@ internal static class TpccWorkload
             CamusTransaction tx = await conn.BeginTransactionAsync(txOptions, ct);
             try
             {
-                await ExecWithParams(conn,
-                    "DELETE FROM tpcc_new_order WHERE no_o_id = @no_o_id AND no_d_id = @d_id AND no_w_id = @w_id",
+                await ExecWithParams(conn, NewOrderDeleteSql,
                 [
                     ("@no_o_id", ColumnType.Integer64, (object)minOId.Value),
                     ("@d_id",    ColumnType.Integer64, (long)d),
                     ("@w_id",    ColumnType.Integer64, wId),
                 ], tx, ct);
 
-                await ExecWithParams(conn,
-                    "UPDATE tpcc_orders SET o_carrier_id = @carrier_id WHERE o_id = @o_id AND o_d_id = @d_id AND o_w_id = @w_id",
+                await ExecWithParams(conn, OrderCarrierSql,
                 [
                     ("@carrier_id", ColumnType.Integer64, (object)(long)carrierId),
                     ("@o_id",       ColumnType.Integer64, minOId.Value),
@@ -676,8 +717,7 @@ internal static class TpccWorkload
                     ("@w_id",       ColumnType.Integer64, wId),
                 ], tx, ct);
 
-                await ExecWithParams(conn,
-                    "UPDATE tpcc_order_line SET ol_delivery_d = @delivery_d WHERE ol_o_id = @o_id AND ol_d_id = @d_id AND ol_w_id = @w_id",
+                await ExecWithParams(conn, OrderLineDeliverySql,
                 [
                     ("@delivery_d", ColumnType.String,    (object)deliveryDate),
                     ("@o_id",       ColumnType.Integer64, minOId.Value),
@@ -700,8 +740,7 @@ internal static class TpccWorkload
         long dId = rng.Next(1, DistrictsPerWarehouse + 1);
         int threshold = rng.Next(10, 21);
 
-        using CamusCommand cmd = conn.CreateSelectCommand(
-            "SELECT s_i_id, s_quantity FROM tpcc_stock WHERE s_w_id = @w_id AND s_quantity < @threshold");
+        using CamusCommand cmd = conn.CreateSelectCommand(StockLevelSql);
         cmd.Parameters.Add("@w_id",      ColumnType.Integer64, wId);
         cmd.Parameters.Add("@threshold", ColumnType.Integer64, (long)threshold);
         cmd.CommandTimeout = 30;
@@ -733,8 +772,7 @@ internal static class TpccWorkload
     // own d_next_o_id increment is validated against.
     private static async Task<long> FetchNextOrderId(CamusConnection conn, CamusTransaction tx, long dId, long wId, CancellationToken ct)
     {
-        using CamusCommand cmd = conn.CreateSelectCommand(
-            "SELECT d_next_o_id FROM tpcc_district WHERE d_id = @d_id AND d_w_id = @d_w_id");
+        using CamusCommand cmd = conn.CreateSelectCommand(NextOrderIdSql);
         cmd.Transaction = tx;
         cmd.Parameters.Add("@d_id",   ColumnType.Integer64, dId);
         cmd.Parameters.Add("@d_w_id", ColumnType.Integer64, wId);

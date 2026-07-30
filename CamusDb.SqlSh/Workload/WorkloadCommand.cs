@@ -28,6 +28,8 @@ internal static class WorkloadCommand
             AnsiConsole.MarkupLine("  --duration N             Run duration in seconds (default: 60)");
             AnsiConsole.MarkupLine("  --locking MODE           Locking mode: optimistic | pessimistic (default: optimistic)");
             AnsiConsole.MarkupLine("  --isolation LEVEL        Isolation level: serializable | read-committed (default: serializable)");
+            AnsiConsole.MarkupLine("  --no-prepare             Run every statement inline instead of preparing it, to compare");
+            AnsiConsole.MarkupLine("                           against the default prepared path");
             AnsiConsole.MarkupLine("  -u, --user NAME          User to authenticate as (authenticated servers only)");
             AnsiConsole.MarkupLine("  -p, --password SECRET    That user's password");
             return;
@@ -56,7 +58,7 @@ internal static class WorkloadCommand
             return;
         }
 
-        List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password);
+        List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password, wa.NoPrepare);
         AnsiConsole.MarkupLine("Connecting to [blue]{0}[/]...", Markup.Escape(GetConnValue(attempts[0], "Endpoint") ?? "server"));
 
         CamusConnection conn;
@@ -84,10 +86,16 @@ internal static class WorkloadCommand
         AnsiConsole.MarkupLine(
             "[green]Connected[/] [grey58]over[/] [white]{0}[/] [grey58]({1})[/]\n",
             DescribeTransport(connStr),
-            Markup.Escape($"{txOptions.Locking} / {txOptions.IsolationLevel}"));
+            Markup.Escape($"{txOptions.Locking} / {txOptions.IsolationLevel}, {(wa.NoPrepare ? "inline statements" : "prepared statements")}"));
 
         try
         {
+            // Only the measured run phase is warmed up. Seeding repeats one INSERT per table thousands
+            // of times, so the driver's own auto-preparation covers it after two executions and the
+            // warm-up would save a round trip that nobody is timing.
+            if (wa.Command == "run" && !wa.NoPrepare)
+                await WarmUpAsync(wa.WorkloadName, conn, connStr);
+
             await DispatchAsync(wa, conn, txOptions);
         }
         catch (Exception ex)
@@ -97,6 +105,39 @@ internal static class WorkloadCommand
             AnsiConsole.MarkupLine("\n[red]Workload failed:[/] {0}", Markup.Escape(ex.Message));
             Environment.ExitCode = 1;
         }
+    }
+
+    /// <summary>
+    /// Prepares the statements the chosen workload's run phase issues, so the first executions
+    /// measure the same path as the millionth one.
+    /// </summary>
+    private static async Task WarmUpAsync(string workloadName, CamusConnection conn, string connectionString)
+    {
+        IReadOnlyList<string> statements = workloadName switch
+        {
+            "bank" => BankWorkload.RunStatements,
+            "northwind" => NorthwindWorkload.RunStatements,
+            "factory" => FactoryWorkload.RunStatements,
+            "tpcc" => TpccWorkload.RunStatements,
+            _ => [],
+        };
+
+        if (statements.Count == 0)
+            return;
+
+        await WorkloadHelpers.PrepareAllAsync(conn, statements);
+
+        // Ask the driver what actually ended up registered rather than trusting that the calls
+        // returned: a server without prepared-statement support declines without raising anything.
+        CamusConnectionStringBuilder builder = new(connectionString);
+        int prepared = statements.Count(builder.IsPrepared);
+
+        if (prepared == statements.Count)
+            AnsiConsole.MarkupLine("[grey58]Prepared[/] [white]{0}[/] [grey58]statements.[/]\n", prepared);
+        else
+            AnsiConsole.MarkupLine(
+                "[grey58]Prepared[/] [white]{0}[/][grey58]/{1} statements; the rest run inline.[/]\n",
+                prepared, statements.Count);
     }
 
     private static async Task DispatchAsync(WorkloadArgs wa, CamusConnection conn, CamusTransactionOptions txOptions)
@@ -145,6 +186,10 @@ internal static class WorkloadCommand
         string? locking = null;
         string? isolation = null;
 
+        // Prepared statements are on by default (the driver's own policy). --no-prepare turns them
+        // off so the same workload can be measured against the inline path.
+        bool noPrepare = false;
+
         // Credentials, for a server with authentication enabled. They also come from the
         // environment, so a scripted run needn't put the password on the command line.
         string? user = Environment.GetEnvironmentVariable("CAMUS_USER");
@@ -176,6 +221,9 @@ internal static class WorkloadCommand
                 case "--isolation":
                     if (i + 1 < args.Length) isolation = args[++i];
                     break;
+                case "--no-prepare":
+                    noPrepare = true;
+                    break;
                 case "-u":
                 case "--user":
                     if (i + 1 < args.Length) user = args[++i];
@@ -187,7 +235,7 @@ internal static class WorkloadCommand
             }
         }
 
-        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password);
+        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password, noPrepare);
     }
 
     // Canonical connection-string value for --locking, or null if the value is unrecognized.
@@ -225,18 +273,19 @@ internal static class WorkloadCommand
         string? locking,
         string? isolation,
         string? user = null,
-        string? password = null)
+        string? password = null,
+        bool noPrepare = false)
     {
         if (string.IsNullOrEmpty(connectionSource))
         {
             // No connection string: use the well-known local ports for each transport.
-            string grpc = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultGrpcPort};Database={database};Protocol=grpc", locking, isolation, user, password);
-            string rest = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultRestPort};Database={database};Protocol=rest", locking, isolation, user, password);
+            string grpc = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultGrpcPort};Database={database};Protocol=grpc", locking, isolation, user, password, noPrepare);
+            string rest = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultRestPort};Database={database};Protocol=rest", locking, isolation, user, password, noPrepare);
             return [grpc, rest];
         }
 
         string cs = HasKey(connectionSource, "Database") ? connectionSource : $"{connectionSource};Database={database}";
-        cs = ApplyWorkloadDefaults(cs, locking, isolation, user, password);
+        cs = ApplyWorkloadDefaults(cs, locking, isolation, user, password, noPrepare);
 
         // Respect an explicit Protocol= — the user has chosen the transport deliberately.
         if (HasKey(cs, "Protocol"))
@@ -249,11 +298,16 @@ internal static class WorkloadCommand
     // Applies the Locking/IsolationLevel/Timeout keys, defaulting to optimistic + serializable and a
     // command timeout wide enough for a batched commit. A flag value always wins; the default only fills
     // in a key the connection string doesn't already carry.
-    private static string ApplyWorkloadDefaults(string connectionString, string? locking, string? isolation, string? user, string? password)
+    private static string ApplyWorkloadDefaults(string connectionString, string? locking, string? isolation, string? user, string? password, bool noPrepare)
     {
         connectionString = ApplyKey(connectionString, "Locking", locking, defaultValue: "Optimistic");
         connectionString = ApplyKey(connectionString, "IsolationLevel", isolation, defaultValue: "Serializable");
         connectionString = ApplyKey(connectionString, "Timeout", value: null, defaultValue: DefaultTimeoutSeconds.ToString());
+
+        // --no-prepare wins over a MaxAutoPrepare= in -c: the flag is the later, more specific word.
+        // Without it the driver's own default applies, which is why nothing is set in that case.
+        if (noPrepare)
+            connectionString = WithKey(connectionString, "MaxAutoPrepare", "0");
 
         // Credentials have no default: unset means "unauthenticated server", which is how CamusDB
         // ships. When given they override whatever -c carried, since the flag is the later word.
@@ -323,5 +377,6 @@ internal record WorkloadArgs(
     string? Locking,
     string? Isolation,
     string? User = null,
-    string? Password = null
+    string? Password = null,
+    bool NoPrepare = false
 );

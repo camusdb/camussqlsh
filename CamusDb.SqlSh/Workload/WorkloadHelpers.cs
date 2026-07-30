@@ -64,6 +64,41 @@ internal static class WorkloadHelpers
     }
 
     /// <summary>
+    /// Registers a workload's hot statements with the server before the measured phase starts, and
+    /// returns how many are prepared afterwards.
+    ///
+    /// <para>The driver would prepare them on its own after a couple of executions, so this changes
+    /// no results — it only keeps the warm-up out of the numbers, which otherwise charges the first
+    /// executions of every statement an extra round trip and skews the early per-second samples.</para>
+    ///
+    /// <para>Best-effort by design: a server with no prepared-statement support declines, the driver
+    /// keeps running the statement inline, and the workload proceeds unchanged.</para>
+    /// </summary>
+    internal static async Task<int> PrepareAllAsync(CamusConnection conn, IReadOnlyList<string> statements)
+    {
+        int prepared = 0;
+
+        foreach (string sql in statements)
+        {
+            using CamusCommand cmd = conn.CreateCamusCommand(sql);
+            cmd.CommandTimeout = 30;
+
+            try
+            {
+                await cmd.PrepareAsync();
+                prepared++;
+            }
+            catch
+            {
+                // Preparing is an optimization, never a precondition: a statement that fails to
+                // register here simply runs inline once the workload starts.
+            }
+        }
+
+        return prepared;
+    }
+
+    /// <summary>
     /// Runs <paramref name="body"/> over <paramref name="source"/> with at most <paramref name="degree"/>
     /// operations in flight. Init paths use this so seeding isn't a strictly serial round-trip-per-row
     /// walk: the transport multiplexes the concurrent commands over its pooled streams.

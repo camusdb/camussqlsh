@@ -49,6 +49,14 @@ internal static class NorthwindWorkload
     private const string ProductsByCategorySql =
         "SELECT product_id, product_name, units_in_stock FROM products WHERE category_id = @category_id";
 
+    /// <summary>
+    /// Every statement the <c>run</c> phase issues, for the prepared-statement warm-up. Keep in sync
+    /// with <see cref="RunAsync"/>: a statement missing here isn't broken, it just pays the driver's
+    /// usual two-execution warm-up instead of being registered before the clock starts.
+    /// </summary>
+    internal static IReadOnlyList<string> RunStatements =>
+        [ProductsByCategorySql, OrderInsertSql, OrderDetailInsertSql];
+
     // -------------------------------------------------------------------------
     // Seed data
     // -------------------------------------------------------------------------

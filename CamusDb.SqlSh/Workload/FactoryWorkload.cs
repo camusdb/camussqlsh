@@ -49,6 +49,17 @@ internal static class FactoryWorkload
     private const string RestockInventorySql =
         "UPDATE inventory SET quantity = quantity + @quantity WHERE robot_id = @robot_id";
 
+    /// <summary>
+    /// Every statement the <c>run</c> phase issues, for the prepared-statement warm-up. Keep in sync
+    /// with <see cref="RunAsync"/>: a statement missing here isn't broken, it just pays the driver's
+    /// usual two-execution warm-up instead of being registered before the clock starts.
+    /// </summary>
+    internal static IReadOnlyList<string> RunStatements =>
+    [
+        InventoryByKindSql, OrdersByCustomerSql, OrderInsertSql,
+        DecrementInventorySql, OwnershipInsertSql, RestockInventorySql,
+    ];
+
     private static readonly string[] Statuses = ["pending", "shipped", "delivered", "cancelled"];
 
     private static readonly string[] Kinds =
