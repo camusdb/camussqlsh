@@ -1542,7 +1542,7 @@ static List<string> RemoveAdjacentDuplicates(IEnumerable<string> history)
 static void PrintHelp()
 {
     AnsiConsole.MarkupLine("Usage: camus-cli [[database]] [[options]]");
-    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory|tpcc> [[options]]");
+    AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory|tpcc|tpcb> [[options]]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Options:[/]");
     AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
@@ -1568,8 +1568,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  CAMUS_ACCESS_TOKEN            Default for [cyan]--token[/]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Subcommands:[/]");
-    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory|tpcc>  Create schema and seed data for a workload");
-    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind|factory|tpcc>  Run a continuous workload against the database");
+    AnsiConsole.MarkupLine("  [cyan]workload init[/] <bank|northwind|factory|tpcc|tpcb>  Create schema and seed data for a workload");
+    AnsiConsole.MarkupLine("  [cyan]workload run[/]  <bank|northwind|factory|tpcc|tpcb>  Run a continuous workload against the database");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Workload options:[/]");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string");
@@ -1605,6 +1605,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init tpcc --database tpcc --rows 1");
     AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init tpcb --database tpcb --rows 10000");
+    AnsiConsole.MarkupLine("  camus-cli workload run tpcb --concurrency 8 --duration 120");
 }
 
 static bool ConsumeFlag(ref string[] args, string flag)

@@ -18,12 +18,13 @@ internal static class WorkloadCommand
         if (wa.Command != "init" && wa.Command != "run")
         {
             AnsiConsole.MarkupLine("[red]Unknown workload command:[/] {0}", Markup.Escape(wa.Command.Length > 0 ? wa.Command : "(none)"));
-            AnsiConsole.MarkupLine("Usage: camus-cli workload <init|run> <bank|northwind|factory|tpcc> [[options]]");
+            AnsiConsole.MarkupLine("Usage: camus-cli workload <init|run> <bank|northwind|factory|tpcc|tpcb> [[options]]");
             AnsiConsole.MarkupLine("Options:");
             AnsiConsole.MarkupLine("  -c, --connection-source  Connection string (default: gRPC on http://localhost:5096,");
             AnsiConsole.MarkupLine("                           falling back to REST on http://localhost:5095)");
             AnsiConsole.MarkupLine("  --database               Target database name (default: demo)");
-            AnsiConsole.MarkupLine("  --rows N                 Number of rows to generate for init (default: 1000, bank only)");
+            AnsiConsole.MarkupLine("  --rows N                 Number of rows to generate for init (default: 1000; accounts for");
+            AnsiConsole.MarkupLine("                           bank and tpcb, warehouses for tpcc)");
             AnsiConsole.MarkupLine("  --concurrency N          Parallel workers for run, parallel writers for init (default: 64)");
             AnsiConsole.MarkupLine("  --duration N             Run duration in seconds (default: 60)");
             AnsiConsole.MarkupLine("  --locking MODE           Locking mode: optimistic | pessimistic (default: optimistic)");
@@ -35,10 +36,10 @@ internal static class WorkloadCommand
             return;
         }
 
-        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind" && wa.WorkloadName != "factory" && wa.WorkloadName != "tpcc")
+        if (wa.WorkloadName != "bank" && wa.WorkloadName != "northwind" && wa.WorkloadName != "factory" && wa.WorkloadName != "tpcc" && wa.WorkloadName != "tpcb")
         {
             AnsiConsole.MarkupLine("[red]Unknown workload:[/] {0}", Markup.Escape(wa.WorkloadName.Length > 0 ? wa.WorkloadName : "(none)"));
-            AnsiConsole.MarkupLine("Available workloads: bank, northwind, factory, tpcc");
+            AnsiConsole.MarkupLine("Available workloads: bank, northwind, factory, tpcc, tpcb");
             return;
         }
 
@@ -119,6 +120,7 @@ internal static class WorkloadCommand
             "northwind" => NorthwindWorkload.RunStatements,
             "factory" => FactoryWorkload.RunStatements,
             "tpcc" => TpccWorkload.RunStatements,
+            "tpcb" => TpcbWorkload.RunStatements,
             _ => [],
         };
 
@@ -167,6 +169,12 @@ internal static class WorkloadCommand
                     await TpccWorkload.InitAsync(conn, wa.Rows, wa.Concurrency, txOptions);
                 else
                     await TpccWorkload.RunAsync(conn, wa.Concurrency, wa.Duration, txOptions);
+                break;
+            case "tpcb":
+                if (wa.Command == "init")
+                    await TpcbWorkload.InitAsync(conn, wa.Rows, wa.Concurrency, txOptions);
+                else
+                    await TpcbWorkload.RunAsync(conn, wa.Concurrency, wa.Duration, txOptions);
                 break;
         }
     }
