@@ -363,6 +363,8 @@ if (richEditorSupported)
         "all",
         "for",
         "sha256_password",
+        "engine",
+        "stats",
     ];
 
     string[] functions = [
@@ -1278,7 +1280,8 @@ static bool IsSystemLevelQuery(string sql)
            trimmedSql.StartsWith("show orphan databases", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show branches from ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase);
+           trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("show engine stats", StringComparison.InvariantCultureIgnoreCase);
 }
 
 // User and grant administration is server-level: like database DDL, these statements name their
