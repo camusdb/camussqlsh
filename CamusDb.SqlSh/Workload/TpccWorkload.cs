@@ -23,32 +23,37 @@ internal static class TpccWorkload
     // SQL templates
     // -------------------------------------------------------------------------
 
+    // Seed inserts carry an explicit @id instead of GEN_ID(): the id is derived deterministically
+    // from the row's natural key (see SeedId), so replaying a seed batch whose commit reply was
+    // lost re-inserts the same primary keys and the duplicate-key error confirms the batch is
+    // durable — with GEN_ID() every replay would mint fresh ids and silently double-insert.
+    // Run-phase inserts keep GEN_ID(); they are never replayed.
     private const string WarehouseInsertSql =
         "INSERT INTO tpcc_warehouse (id, w_id, w_name, w_street_1, w_street_2, w_city, w_state, w_zip, w_tax, w_ytd) " +
-        "VALUES (GEN_ID(), @w_id, @w_name, @w_street_1, @w_street_2, @w_city, @w_state, @w_zip, @w_tax, @w_ytd)";
+        "VALUES (@id, @w_id, @w_name, @w_street_1, @w_street_2, @w_city, @w_state, @w_zip, @w_tax, @w_ytd)";
 
     private const string DistrictInsertSql =
         "INSERT INTO tpcc_district (id, d_id, d_w_id, d_name, d_street_1, d_street_2, d_city, d_state, d_zip, d_tax, d_ytd, d_next_o_id) " +
-        "VALUES (GEN_ID(), @d_id, @d_w_id, @d_name, @d_street_1, @d_street_2, @d_city, @d_state, @d_zip, @d_tax, @d_ytd, @d_next_o_id)";
+        "VALUES (@id, @d_id, @d_w_id, @d_name, @d_street_1, @d_street_2, @d_city, @d_state, @d_zip, @d_tax, @d_ytd, @d_next_o_id)";
 
     private const string CustomerInsertSql =
         "INSERT INTO tpcc_customer (id, c_id, c_d_id, c_w_id, c_first, c_middle, c_last, " +
         "c_street_1, c_street_2, c_city, c_state, c_zip, c_phone, c_since, c_credit, " +
         "c_credit_lim, c_discount, c_balance, c_ytd_payment, c_payment_cnt, c_delivery_cnt, c_data) " +
-        "VALUES (GEN_ID(), @c_id, @c_d_id, @c_w_id, @c_first, @c_middle, @c_last, " +
+        "VALUES (@id, @c_id, @c_d_id, @c_w_id, @c_first, @c_middle, @c_last, " +
         "@c_street_1, @c_street_2, @c_city, @c_state, @c_zip, @c_phone, @c_since, @c_credit, " +
         "@c_credit_lim, @c_discount, @c_balance, @c_ytd_payment, @c_payment_cnt, @c_delivery_cnt, @c_data)";
 
     private const string ItemInsertSql =
         "INSERT INTO tpcc_item (id, i_id, i_im_id, i_name, i_price, i_data) " +
-        "VALUES (GEN_ID(), @i_id, @i_im_id, @i_name, @i_price, @i_data)";
+        "VALUES (@id, @i_id, @i_im_id, @i_name, @i_price, @i_data)";
 
     private const string StockInsertSql =
         "INSERT INTO tpcc_stock (id, s_i_id, s_w_id, s_quantity, " +
         "s_dist_01, s_dist_02, s_dist_03, s_dist_04, s_dist_05, " +
         "s_dist_06, s_dist_07, s_dist_08, s_dist_09, s_dist_10, " +
         "s_ytd, s_order_cnt, s_remote_cnt, s_data) " +
-        "VALUES (GEN_ID(), @s_i_id, @s_w_id, @s_quantity, " +
+        "VALUES (@id, @s_i_id, @s_w_id, @s_quantity, " +
         "@s_dist_01, @s_dist_02, @s_dist_03, @s_dist_04, @s_dist_05, " +
         "@s_dist_06, @s_dist_07, @s_dist_08, @s_dist_09, @s_dist_10, " +
         "0.00, 0, 0, @s_data)";
@@ -131,6 +136,17 @@ internal static class TpccWorkload
         if (warehouses < 1) warehouses = 1;
 
         AnsiConsole.MarkupLine("[cyan]Creating TPC-C schema...[/]");
+
+        // Re-init clears by dropping the tables rather than DELETEing rows: a bulk DELETE of a seeded
+        // 1000-warehouse dataset is ~1.2M mutations in one transaction, which exceeds the server's
+        // per-transaction mutation cap and fails the whole init. Dropping is constant-cost and leaves
+        // the CREATEs below to rebuild the schema. A missing table on first init is not a failure.
+        string[] dropOrder = ["tpcc_history", "tpcc_order_line", "tpcc_new_order", "tpcc_orders",
+                              "tpcc_stock", "tpcc_customer", "tpcc_item", "tpcc_district", "tpcc_warehouse"];
+        foreach (string t in dropOrder)
+        {
+            try { await DDL(conn, $"DROP TABLE {t}"); } catch (CamusException) { }
+        }
 
         string[] ddls =
         [
@@ -297,14 +313,7 @@ internal static class TpccWorkload
             try { await DDL(conn, index); } catch (CamusException) { }
         }
 
-        AnsiConsole.MarkupLine("[green]Schema ready.[/] Clearing existing data...");
-
-        string[] tables = ["tpcc_history", "tpcc_order_line", "tpcc_new_order", "tpcc_orders",
-                           "tpcc_stock", "tpcc_customer", "tpcc_item", "tpcc_district", "tpcc_warehouse"];
-        foreach (string t in tables)
-            await Exec(conn, $"DELETE FROM {t} WHERE id IS NOT NULL");
-
-        AnsiConsole.MarkupLine("Seeding data for [blue]{0}[/] warehouse(s) ([blue]{1}[/] parallel writers)...\n", warehouses, concurrency);
+        AnsiConsole.MarkupLine("[green]Schema ready.[/] Seeding data for [blue]{0}[/] warehouse(s) ([blue]{1}[/] parallel writers)...\n", warehouses, concurrency);
 
         Random rng = new(42);
         string now = DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss");
@@ -321,7 +330,8 @@ internal static class TpccWorkload
         {
             warehouseRows.Add((WarehouseInsertSql,
             [
-                ("@w_id",       ColumnType.Integer64, (object)(long)w),
+                ("@id",         ColumnType.Id,        (object)SeedId(WarehouseTag, w)),
+                ("@w_id",       ColumnType.Integer64, (long)w),
                 ("@w_name",     ColumnType.String,    $"Warehouse-{w}"),
                 ("@w_street_1", ColumnType.String,    "100 Main St"),
                 ("@w_street_2", ColumnType.String,    $"Suite {w}"),
@@ -340,7 +350,8 @@ internal static class TpccWorkload
             {
                 districtRows.Add((DistrictInsertSql,
                 [
-                    ("@d_id",        ColumnType.Integer64, (object)(long)d),
+                    ("@id",          ColumnType.Id,        (object)SeedId(DistrictTag, w, d)),
+                    ("@d_id",        ColumnType.Integer64, (long)d),
                     ("@d_w_id",      ColumnType.Integer64, (long)w),
                     ("@d_name",      ColumnType.String,    $"District-{d}"),
                     ("@d_street_1",  ColumnType.String,    $"{d} Commerce Ave"),
@@ -364,7 +375,8 @@ internal static class TpccWorkload
                 {
                     customerRows.Add((CustomerInsertSql,
                     [
-                        ("@c_id",           ColumnType.Integer64, (object)(long)c),
+                        ("@id",             ColumnType.Id,        (object)SeedId(CustomerTag, w, d, c)),
+                        ("@c_id",           ColumnType.Integer64, (long)c),
                         ("@c_d_id",         ColumnType.Integer64, (long)d),
                         ("@c_w_id",         ColumnType.Integer64, (long)w),
                         ("@c_first",        ColumnType.String,    FirstName(rng)),
@@ -395,7 +407,8 @@ internal static class TpccWorkload
         {
             itemRows.Add((ItemInsertSql,
             [
-                ("@i_id",    ColumnType.Integer64, (object)(long)i),
+                ("@id",      ColumnType.Id,        (object)SeedId(ItemTag, i)),
+                ("@i_id",    ColumnType.Integer64, (long)i),
                 ("@i_im_id", ColumnType.Integer64, (long)rng.Next(1, 10001)),
                 ("@i_name",  ColumnType.String,    $"Item-{i}"),
                 ("@i_price", ColumnType.Float64,   Math.Round(1.0 + rng.NextDouble() * 99.0, 2)),
@@ -410,7 +423,8 @@ internal static class TpccWorkload
             {
                 stockRows.Add((StockInsertSql,
                 [
-                    ("@s_i_id",     ColumnType.Integer64, (object)(long)i),
+                    ("@id",         ColumnType.Id,        (object)SeedId(StockTag, w, 0, i)),
+                    ("@s_i_id",     ColumnType.Integer64, (long)i),
                     ("@s_w_id",     ColumnType.Integer64, (long)w),
                     ("@s_quantity", ColumnType.Integer64, (long)rng.Next(10, 101)),
                     ("@s_dist_01",  ColumnType.String,    RandStr24(rng)),
@@ -543,6 +557,11 @@ internal static class TpccWorkload
         {
             long oId = await FetchNextOrderId(conn, tx, dId, wId, ct);
 
+            // Statements are awaited one at a time, deliberately: the write set has no data dependencies, but
+            // firing it as a concurrent wave (Task.WhenAll over the BatchExecute stream) measured 7x WORSE
+            // (24.5 -> 3.4 tx/s at 8 clients) — concurrent ops on one transaction handle work correctly but
+            // hit a seconds-scale server-side stall tail (execute p99 2s vs p50 11ms) that freezes the whole
+            // wave. Until that per-transaction path handles concurrency, sequential await is the fast shape.
             await ExecWithParams(conn, OrderInsertSql,
             [
                 ("@o_id",        ColumnType.Integer64, (object)oId),
@@ -812,6 +831,21 @@ internal static class TpccWorkload
         if (roll < 96) return 3; // delivery
         return 4;                // stock-level
     }
+
+    // Seed-table tags for SeedId. One per seeded table so ids can never collide across tables.
+    private const int WarehouseTag = 1;
+    private const int DistrictTag = 2;
+    private const int CustomerTag = 3;
+    private const int ItemTag = 4;
+    private const int StockTag = 5;
+
+    /// <summary>
+    /// Deterministic 24-hex OID for a seed row, packed as table tag (2) + a (8) + b (6) + c (8) hex
+    /// digits. The same natural key always yields the same primary key, which is what makes seed-batch
+    /// replays idempotent (see <see cref="WorkloadHelpers.RunSeedBatch"/>).
+    /// </summary>
+    private static string SeedId(int tableTag, long a, long b = 0, long c = 0) =>
+        $"{tableTag:x2}{a:x8}{b:x6}{c:x8}";
 
     private static string F(double v) => v.ToString("F2", CultureInfo.InvariantCulture);
 

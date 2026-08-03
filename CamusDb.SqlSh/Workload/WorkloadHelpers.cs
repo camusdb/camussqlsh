@@ -135,7 +135,20 @@ internal static class WorkloadHelpers
     private const string DuplicatePrimaryKeyCode = "CADB0402";
     private const string DuplicateUniqueKeyCode = "CADB0300";
 
+    /// <summary>
+    /// Server codes for a <b>definite non-commit</b> — see CamusDBErrorCodes. CADB0502 is a commit
+    /// aborted by the coordinator (conflict or deadline); CADB0504 is a pre-write transient (routing
+    /// or lock acquisition failed before any data was written). Both guarantee nothing was committed,
+    /// so replaying the batch from a fresh BEGIN is unconditionally safe.
+    /// </summary>
+    private const string TransactionConflictCode = "CADB0502";
+    private const string TransactionMustRetryCode = "CADB0504";
+
     private const int DefaultSeedAttempts = 4;
+
+    // Definite aborts get a more generous budget than unknown-outcome timeouts: replaying them is
+    // always safe, and under a 64-writer seed flood the coordinator sheds load with exactly these.
+    private const int MaxDefiniteAbortAttempts = 10;
 
     /// <summary>
     /// Seed-path wrapper around <see cref="RunBatch"/> that survives a lost commit reply.
@@ -159,30 +172,46 @@ internal static class WorkloadHelpers
         IEnumerable<(string Sql, Param[] Parameters)> statements,
         int maxAttempts = DefaultSeedAttempts)
     {
-        for (int attempt = 0; ; attempt++)
+        int unknownReplays = 0;
+        int abortRetries = 0;
+
+        while (true)
         {
             try
             {
                 await RunBatch(conn, txOptions, statements);
                 return;
             }
-            catch (CamusException ex) when (attempt > 0 && IsDuplicateKey(ex))
+            catch (CamusException ex) when (unknownReplays > 0 && IsDuplicateKey(ex))
             {
-                // Only reachable after a replay: an earlier attempt's commit was durable after all, we
-                // just never saw the reply. Treat the batch as seeded.
+                // Only reachable after an unknown-outcome replay: an earlier attempt's commit was
+                // durable after all, we just never saw the reply. Treat the batch as seeded. Gated on
+                // unknownReplays (not abortRetries) because only a lost reply creates that ambiguity —
+                // after a definite abort a duplicate key would be a real error.
                 return;
             }
-            catch (OperationCanceledException) when (attempt < maxAttempts - 1)
+            catch (CamusException ex) when (IsDefiniteAbort(ex) && abortRetries < MaxDefiniteAbortAttempts - 1)
+            {
+                // The coordinator aborted the commit (conflict or deadline) or refused pre-write:
+                // nothing was committed, so a replay cannot double-apply. Back off and go again.
+                abortRetries++;
+                await Task.Delay(SeedRetryDelay(abortRetries));
+            }
+            catch (OperationCanceledException) when (unknownReplays < maxAttempts - 1)
             {
                 // Client-side commit/statement timeout. Back off before replaying; the jitter keeps a
                 // fleet of parallel writers from retrying in lockstep.
-                await Task.Delay(SeedRetryDelay(attempt));
+                unknownReplays++;
+                await Task.Delay(SeedRetryDelay(unknownReplays));
             }
         }
     }
 
     private static bool IsDuplicateKey(CamusException ex)
         => ex.Code is DuplicatePrimaryKeyCode or DuplicateUniqueKeyCode;
+
+    private static bool IsDefiniteAbort(CamusException ex)
+        => ex.Code is TransactionConflictCode or TransactionMustRetryCode;
 
     // 100 ms x 2^attempt, plus up to 100 ms of jitter.
     private static TimeSpan SeedRetryDelay(int attempt)
