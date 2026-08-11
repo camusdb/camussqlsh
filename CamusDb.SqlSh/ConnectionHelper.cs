@@ -52,18 +52,9 @@ internal static class ConnectionHelper
     {
         Validate(connectionString);
 
-        SessionPoolOptions options = new()
-        {
-            MinimumPooledSessions = 1,
-            MaximumActiveSessions = 20,
-        };
-
-        SessionPoolManager manager = SessionPoolManager.Create(options);
-
-        CamusConnectionStringBuilder builder = new(connectionString)
-        {
-            SessionPoolManager = manager
-        };
+        // CamusDB has no server-side sessions to pool; the gRPC stream pool is tuned with the
+        // ChannelPoolSize= connection-string key, which callers can set on their own string.
+        CamusConnectionStringBuilder builder = new(connectionString);
 
         CamusConnection connection = new(builder);
         await connection.OpenAsync();

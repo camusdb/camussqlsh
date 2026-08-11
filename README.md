@@ -189,6 +189,28 @@ Run SQL from a file:
 source ./schema.sql
 ```
 
+Switch the current database:
+
+```sql
+use northwind;
+use `order details`;
+```
+
+`use` is handled by the shell rather than the server — the database is part of the connection
+string, so the shell reopens the connection against it. The name may be bare, `` `backticked` ``,
+or `"quoted"`, which is how a name that collides with a keyword or contains spaces is written.
+It works in script files and with `-e` as well as at the prompt, so a dump can switch databases
+mid-file, and a session started without a database can select one from its first statement.
+
+Take and administer backups:
+
+```sql
+backup full
+backup list
+```
+
+Like `use`, the `backup` family is the shell's rather than the server's — see [Backups](#backups).
+
 ### Prepared statements
 
 The driver registers a statement with the server once it has seen the same SQL a couple of
@@ -270,9 +292,10 @@ $ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -f seed.sql
 ```
 
 Statements are separated by semicolons and run in order, and `\G` and comments are handled
-exactly as with `source` inside the shell. Execution stops at the first statement that
-fails: the error is printed with the offending statement, the remaining statements are left
-unrun, and the process exits with status `1`.
+exactly as with `source` inside the shell — the file is streamed, so its size doesn't matter.
+Execution stops at the first statement that fails: the error is printed with the offending
+statement and the line it started on, the remaining statements are left unrun, and the process
+exits with status `1`.
 
 Use `-` as the path to read the script from standard input:
 
@@ -426,6 +449,81 @@ rollback;
 
 Only one active transaction is allowed at a time. If `commit` or `rollback` fails, the shell clears its local transaction state so a new transaction can be started.
 
+## Backups
+
+`backup` drives the server's **online** backup and point-in-time-recovery administration: taking
+backups, listing the catalog, resolving a restore chain, and running retention. All of it is safe
+while the server serves traffic.
+
+```text
+backup full                            take a full backup
+backup incremental <parent-backup-id>  chain an incremental onto a backup
+backup coordinated                     take a cluster-wide consistent backup
+backup list                            list the node's backup catalog
+backup chain <leaf-backup-id>          resolve and validate a restore chain
+backup gc preview                      report what retention would reclaim
+backup gc                              run retention now
+```
+
+`backup` on its own (or `backup help`) prints that list.
+
+A typical session — take a full backup, chain an incremental onto it, then check the chain would
+actually restore:
+
+```text
+camus> backup full
+    Backup Id: 971a0a88-3d36-42c6-b36b-8d1e773f40c4
+         Type: Full
+Created (UTC): 2026-08-10 03:45:47
+       Parent: (none)
+   Partitions: 4
+Backup OK (00:00:03.117)
+
+camus> backup incremental 971a0a88-3d36-42c6-b36b-8d1e773f40c4
+camus> backup chain 719b7b6b-281d-4979-bf63-b495a7d1bdaf
+```
+
+`backup chain` is the validating read: a chain that could not be assembled is rejected here rather
+than at restore time, so it doubles as a "would this backup actually restore?" check. It prints the
+chain root-first and, underneath, the **recoverable window** a point-in-time restore may target —
+the server reports that window for the whole chain on its root, not on the leaf.
+
+Things worth knowing:
+
+- **Backups are node-wide, not per-database.** Every database on a CamusDB server shares one storage
+  node, so a backup captures all of them at once. Nothing here is scoped to the current database, and
+  the commands work with no database selected.
+- **The server must opt in.** Backups are off until `kahuna.backup_dir` is set in the server's
+  `config.yml`; until then every command fails with `BackupNotConfigured` (HTTP 503).
+- **Superuser only.** With authentication enabled, every command needs a superuser — connect with
+  `-u`/`--token` as one. With authentication *disabled* the server restricts this surface to loopback
+  callers, so a remote shell is refused rather than allowed to take an anonymous node-wide backup.
+- **An incremental can silently become a full.** If the parent has aged past the retention floor the
+  server takes a full backup instead; the command still succeeds and reports the substitution and its
+  reason in yellow.
+- **`backup coordinated` must reach the coordinator.** Another node refuses with
+  `BackupNotCoordinator`. Pin `BackupEndpoint=` to the coordinator when `Endpoint=` is a multi-node
+  pool.
+- **The API is REST-only.** It has no SQL form and no gRPC service. The shell points its default gRPC
+  connection at the well-known HTTP port for you; against a `-c` connection string with an explicit
+  `Protocol=grpc`, add `BackupEndpoint=` naming the server's HTTP endpoint.
+- **Backup requests use their own timeout** — `BackupTimeout=` in the connection string, 300 seconds
+  by default, rather than the statement timeout, since a full backup copies a whole node's base image.
+
+Retention runs automatically after each backup and on a periodic tick, so `backup gc` is only needed
+to reclaim space immediately after tightening the limits. Preview it first — the preview deletes
+nothing and reports what the configured limits would drop:
+
+```text
+camus> backup gc preview
+Retention preview: 2 backups, 0 orphans, 1.41 GB would reclaim (00:00:00.041)
+```
+
+**Restore is not here.** A restore rebuilds into a *fresh* data root, after which the server is
+stopped and a new one booted against it — there is no hot in-place restore, so it stays an operator
+runbook step rather than something the shell can drive to completion. See the server's
+`backups-and-point-in-time-recovery` guide.
+
 ## Syntax Coloring
 
 The interactive editor colors SQL keywords, shell commands, constants, numbers, quoted strings, and supported function names.
@@ -436,14 +534,15 @@ Colored SQL keywords include:
 select update from where order by asc desc describe database table set create if exists default
 primary key index indexes constraint limit insert into values delete alter rename column drop
 null not string int64 float64 object_id oid bool boolean is on in or and between like ilike add
-show use tables view views columns group join inner offset unique having explain analyze begin
-start transaction commit rollback as distinct cast integer double
+show use tables view views materialized refresh concurrently cascade owner no data columns group
+join inner offset unique having explain analyze begin start transaction commit rollback as
+distinct cast integer double
 ```
 
 Colored shell commands:
 
 ```text
-clear source use exit quit
+clear source use exit quit backup
 ```
 
 Colored constants:
@@ -475,9 +574,9 @@ Press `Tab` to autocomplete the word under the cursor; press it again to cycle t
 matches, and `Ctrl+Tab` to cycle backwards.
 
 Completion is context-aware. When the word being typed follows a keyword that expects a
-table name — `from`, `into`, `update`, `join`, `table`, `desc`, or `describe` — the shell
-suggests the **table names** of the current database. In any other position it suggests the
-SQL keywords, functions, and shell commands.
+table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`, or
+`describe` — the shell suggests the **table and view names** of the current database. In
+any other position it suggests the SQL keywords, functions, and shell commands.
 
 ```sql
 select * from us⇥      -- completes to a table such as "users"
@@ -485,8 +584,10 @@ insert into ⇥          -- cycles through all table names
 sel⇥                   -- completes to "select"
 ```
 
-Table names are loaded from `show tables` and refreshed automatically on startup, after a
-`use <database>` switch, and after a `create table` or `drop table` statement.
+Relation names are loaded from `show tables`, `show views` and `show materialized views`,
+and refreshed automatically on startup, after a `use <database>` switch, and after a
+statement that changes the set of relations (`create`/`drop table`, `create [or
+replace]`/`drop`/`alter view`, and their materialized forms).
 
 ## Function Examples
 
@@ -561,7 +662,27 @@ values (gen_id(), 'Ada Lovelace', true);
 select * from users;
 ```
 
-The shell splits statements on semicolons outside quoted strings.
+The file is streamed rather than read into memory, so a dump larger than RAM sources fine and the
+first statement runs immediately instead of after the whole file has been parsed.
+
+Statements are split on semicolons, ignoring any that fall inside `'strings'`, `"strings"`,
+`` `quoted identifiers` ``, `-- line comments`, `# line comments`, or `/* block comments */`.
+Doubled quotes (`'it''s'`) and backslash escapes (`'it\'s'`) are understood, and comments are
+stripped before a statement is sent to the server.
+
+Execution stops at the first statement that fails, reporting the file and the line the statement
+started on. Pass `--force` to carry on instead and print a summary at the end:
+
+```sql
+source ./seed.sql --force
+```
+
+An open transaction stops the file either way: the server has already aborted it, so every
+remaining statement would fail too.
+
+A file may contain `use` statements to switch databases as it goes; a `use` inside an open
+transaction is refused and stops the file, since the rest of it would otherwise run against the
+wrong database.
 
 ## Output
 

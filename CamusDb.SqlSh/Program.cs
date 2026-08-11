@@ -184,44 +184,54 @@ SqlCompletion? sqlCompletion = null;
 // and exit non-zero so a caller can tell the statement didn't run.
 if (nonInteractive)
 {
-    // A script runs before -e, so `-f schema.sql -e "select ..."` reads back what the script wrote.
-    string? script = null;
-    if (!string.IsNullOrWhiteSpace(opts.File))
-    {
-        script = readScriptFromStdin
-            ? await Console.In.ReadToEndAsync()
-            : await File.ReadAllTextAsync(opts.File);
-    }
-
     // The statement that was running when things failed, so the error can point at it rather than
-    // at the whole file.
+    // at the whole file, and where in the script it came from.
     string? failedSql = null;
+    string? failedAt = null;
 
     try
     {
-        if (script is not null)
+        // A script runs before -e, so `-f schema.sql -e "select ..."` reads back what the script wrote.
+        if (!string.IsNullOrWhiteSpace(opts.File))
         {
-            // Statements run one at a time (rather than handing the whole file to ExecuteSql) so a
-            // failure can name the offending statement and stop the script there, leaving the rest
-            // unrun instead of pressing on against a half-applied schema.
-            foreach ((string sql, bool vertical) in EscapeStringIntoLines(NormalizeSmartQuotes(script)))
-            {
-                if (string.IsNullOrWhiteSpace(sql))
-                    continue;
+            string origin = readScriptFromStdin ? "<stdin>" : opts.File;
+            TextReader scriptReader = readScriptFromStdin ? Console.In : File.OpenText(opts.File);
 
-                failedSql = sql;
-                await ExecuteSql(connection, vertical ? sql + "\\G" : sql);
+            try
+            {
+                // Statements run one at a time, as the reader produces them (rather than slurping the
+                // file and handing it to ExecuteSql) so a multi-gigabyte dump costs one statement of
+                // memory, and so a failure can name the offending statement and stop the script there,
+                // leaving the rest unrun instead of pressing on against a half-applied schema.
+                await foreach (SqlStatement statement in ReadStatements(scriptReader))
+                {
+                    failedSql = statement.Sql;
+                    failedAt = $"{origin}:{statement.Line}";
+                    await ExecuteStatement(statement.Sql, statement.Vertical);
+                }
             }
+            finally
+            {
+                // Console.In outlives this block — only a file handle is ours to close.
+                if (!readScriptFromStdin)
+                    scriptReader.Dispose();
+            }
+
+            failedSql = null;
+            failedAt = null;
         }
 
         if (!string.IsNullOrWhiteSpace(opts.Execute))
         {
             failedSql = opts.Execute;
-            await ExecuteSql(connection, opts.Execute);
+            await ExecuteSql(opts.Execute);
         }
     }
     catch (Exception ex)
     {
+        if (failedAt is not null)
+            AnsiConsole.MarkupLine("[red]{0}[/]", Markup.Escape(failedAt));
+
         WriteStatementError(ex, failedSql);
         Environment.ExitCode = 1;
     }
@@ -366,6 +376,18 @@ if (richEditorSupported)
         "engine",
         "stats",
         "variables",
+        "view",
+        "views",
+        "materialized",
+        "refresh",
+        "cascade",
+        "option",
+        "local",
+        "cascaded",
+        "no",
+        "data",
+        "concurrently",
+        "owner",
     ];
 
     string[] functions = [
@@ -448,6 +470,7 @@ if (richEditorSupported)
         "workload",
         "init",
         "run",
+        "backup",
     ];
 
     string[] constants = [
@@ -625,14 +648,15 @@ while (true)
 
         if (pendingSql.Length == 0 && sqlTrim.StartsWith("source ", StringComparison.InvariantCultureIgnoreCase))
         {
-            await LoadSource(connection, sqlTrim[7..].Trim());
+            await LoadSource(sqlTrim[7..].Trim());
             continue;
         }
 
+        // Taken here rather than left to run as a statement so a refused switch (mid-transaction)
+        // is a message, not an error that discards the transaction the way a server-side failure does.
         if (pendingSql.Length == 0 && sqlTrim.StartsWith("use ", StringComparison.InvariantCultureIgnoreCase))
         {
-            string newDb = sqlTrim[4..].Trim().TrimEnd(';');
-            if (string.IsNullOrWhiteSpace(newDb))
+            if (!IsUseDatabase(sqlTrim, out string newDb))
             {
                 AnsiConsole.MarkupLine("[red]Usage: use <database>[/]");
                 continue;
@@ -644,13 +668,7 @@ while (true)
                 continue;
             }
 
-            activeConnectionString = SwapDatabase(activeConnectionString, newDb);
-            connection = await ConnectionHelper.OpenAsync(activeConnectionString);
-
-            if (sqlCompletion is not null)
-                await sqlCompletion.RefreshTablesAsync(connection);
-
-            AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(newDb));
+            await SwitchDatabase(newDb);
             continue;
         }
 
@@ -678,7 +696,7 @@ while (true)
         if (!CarriesPassword(executableSql))
             AddHistory(history, executableSql);
 
-        await ExecuteSql(connection, executableSql);
+        await ExecuteSql(executableSql);
 
         if (sqlCompletion is not null && ChangesTableSet(executableSql) && HasDatabase(activeConnectionString))
             await sqlCompletion.RefreshTablesAsync(connection);
@@ -699,124 +717,212 @@ while (true)
     }
 }
 
-async Task LoadSource(CamusConnection connection, string paths)
+async Task LoadSource(string arguments)
 {
-    if (!File.Exists(paths))
+    (string path, bool force) = ParseSourceArguments(arguments);
+
+    if (string.IsNullOrWhiteSpace(path))
     {
-        AnsiConsole.MarkupLine("[red]File not found: {0}[/]\n", Markup.Escape(paths));
+        AnsiConsole.MarkupLine("[red]Usage: source <file> [[--force]][/]\n");
         return;
     }
 
-    //int numberLine = 0;
-    string fileContents = await File.ReadAllTextAsync(paths);
-
-    foreach ((string sql, bool vertical) in EscapeStringIntoLines(fileContents))
+    if (!File.Exists(path))
     {
-        if (string.IsNullOrEmpty(sql))
+        AnsiConsole.MarkupLine("[red]File not found: {0}[/]\n", Markup.Escape(path));
+        return;
+    }
+
+    int executed = 0, failed = 0;
+
+    using StreamReader reader = new(path);
+
+    // Statements arrive as the file is read, so sourcing a dump larger than memory works and the
+    // first statement runs immediately instead of after the whole file has been parsed.
+    await foreach (SqlStatement statement in ReadStatements(reader))
+    {
+        try
         {
-            //numberLine++;
-            continue;
+            await ExecuteStatement(statement.Sql, statement.Vertical);
+            executed++;
         }
+        catch (Exception ex)
+        {
+            failed++;
 
-        await ExecuteSql(connection, vertical ? sql + "\\G" : sql);
+            // Point at the line the statement started on — in a file of thousands, "it failed" isn't
+            // something you can act on.
+            AnsiConsole.MarkupLine("[red]{0}:{1}[/]", Markup.Escape(path), statement.Line);
 
-        //numberLine++;
+            // An open transaction is aborted server-side by the failure, so every remaining statement
+            // would fail too. Stop regardless of --force and let the caller reset it.
+            if (!force || transaction is not null)
+                throw;
+
+            WriteStatementError(ex, statement.Sql);
+        }
+    }
+
+    if (force && failed > 0)
+        AnsiConsole.MarkupLine("[yellow]{0} statement(s) failed, {1} succeeded.[/]\n", failed, executed);
+}
+
+// Streams statements out of a reader one line at a time. Feeding whole lines keeps the scanner's
+// two-character lookahead (`--`, `/*`, `\G`, doubled quotes) inside a single call, since none of
+// those tokens can straddle a line break.
+async IAsyncEnumerable<SqlStatement> ReadStatements(TextReader reader)
+{
+    SqlScanner scanner = new();
+
+    while (true)
+    {
+        string? line = await reader.ReadLineAsync();
+
+        // Fold smart quotes per line so -f files and `source` benefit the way the prompt does.
+        IEnumerable<SqlStatement> statements = line is null
+            ? scanner.Flush()
+            : scanner.Feed(NormalizeSmartQuotes(line) + "\n");
+
+        foreach (SqlStatement statement in statements)
+            yield return statement;
+
+        if (line is null)
+            yield break;
     }
 }
 
-async Task ExecuteSql(CamusConnection connection, string input)
+// `source <file> [--force]` — --force keeps going after a failed statement instead of stopping
+// there, the way mysql's own --force does.
+static (string Path, bool Force) ParseSourceArguments(string arguments)
 {
-    // Also fold smart quotes here so the -e/--execute flag and `source` files benefit, not just
-    // the interactive prompt. Idempotent, so re-folding an already-normalized statement is a no-op.
+    bool force = false;
+    List<string> parts = [];
+
+    foreach (string token in arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+    {
+        if (string.Equals(token, "--force", StringComparison.InvariantCultureIgnoreCase))
+        {
+            force = true;
+            continue;
+        }
+
+        parts.Add(token);
+    }
+
+    // Rejoin so an unquoted path with spaces still resolves; strip quotes if the user added them,
+    // and the ';' that comes from typing the command the way every other statement is typed.
+    return (string.Join(' ', parts).TrimEnd(';').Trim('"', '\''), force);
+}
+
+// Points the shell at another database by reopening the connection against it — there is no
+// server-side session to tell, so the connection string is the only thing that changes.
+async Task SwitchDatabase(string database)
+{
+    activeConnectionString = SwapDatabase(activeConnectionString, database);
+    connection = await ConnectionHelper.OpenAsync(activeConnectionString);
+
+    if (sqlCompletion is not null)
+        await sqlCompletion.RefreshTablesAsync(connection);
+
+    AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(database));
+}
+
+// Recognizes `use <database>`, with the name bare, `backticked`, or "quoted". A backtick-quoted
+// name is how a database whose name is a keyword or carries spaces is written, and doubled
+// backticks inside it are a literal one.
+static bool IsUseDatabase(string sql, out string database)
+{
+    Match match = Regex.Match(
+        sql.Trim(),
+        """^use\s+(?:`(?<name>(?:``|[^`])+)`|"(?<name>[^"]+)"|(?<name>[^\s;`"]+))\s*;?$""",
+        RegexOptions.IgnoreCase);
+
+    database = match.Success ? match.Groups["name"].Value.Replace("``", "`") : string.Empty;
+    return match.Success && database.Length > 0;
+}
+
+async Task ExecuteSql(string input)
+{
+    // Also fold smart quotes here so the -e/--execute flag benefits, not just the interactive
+    // prompt. Idempotent, so re-folding an already-normalized statement is a no-op.
     input = NormalizeSmartQuotes(input);
 
     foreach ((string sql, bool vertical) in EscapeStringIntoLines(input))
+        await ExecuteStatement(sql, vertical);
+}
+
+async Task ExecuteStatement(string sql, bool vertical)
+{
+    if (string.IsNullOrWhiteSpace(sql))
+        return;
+
+    // USE is the shell's, not the server's — the database lives in the connection string. Handling it
+    // here rather than only at the prompt means a script can switch databases mid-file, the way a
+    // multi-database dump does, and it has to come before the no-database check below: a file that
+    // opens with USE is exactly how a session with no database selected gets one.
+    if (IsUseDatabase(sql, out string database))
     {
-        if (string.IsNullOrWhiteSpace(sql))
-            continue;
+        // Refusing to switch would leave the rest of the file running against the wrong database,
+        // so this stops the script instead of warning and carrying on.
+        if (transaction is not null)
+            throw new InvalidOperationException("There's an active transaction, please commit or rollback before switching databases");
 
-        bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
-        if (needsDb && !HasDatabase(activeConnectionString))
-        {
-            AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
-            continue;
-        }
-
-        if (IsSystemLevelQuery(sql))
-        {
-            string sysCs = GetEndpointConnectionString(activeConnectionString);
-            CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
-            await ExecuteQuery(sysConn, sql, vertical);
-        }
-        else if (IsQueryable(sql))
-            await ExecuteQuery(connection, sql, vertical);
-        else if (IsServerLevelDDL(sql))
-        {
-            string sysCs = GetEndpointConnectionString(activeConnectionString);
-            CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
-            await ExecuteDDL(sysConn, sql);
-        }
-        else if (IsDDL(sql))
-            await ExecuteDDL(connection, sql);
-        else if (IsBeginTx(sql))
-            await ExecuteBeginTx(connection);
-        else if (IsCommitTx(sql))
-            await ExecuteCommitTx(connection);
-        else if (IsRollbackTx(sql))
-            await ExecuteRollbackTx(connection);
-        else
-            await ExecuteNonQuery(connection, sql);
+        await SwitchDatabase(database);
+        return;
     }
+
+    // Backups are the shell's, not the server's: they have no SQL form at all — they are node-wide REST
+    // admin calls that go out over HTTP even on a gRPC connection. Handled here rather than at the prompt
+    // so a script file and -e get them too, and before the no-database check below because a backup
+    // captures every database on the node and needs none of them selected.
+    if (IsBackupCommand(sql, out string backupArguments))
+    {
+        await ExecuteBackup(backupArguments);
+        return;
+    }
+
+    bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
+    if (needsDb && !HasDatabase(activeConnectionString))
+    {
+        AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
+        return;
+    }
+
+    if (IsSystemLevelQuery(sql))
+    {
+        string sysCs = GetEndpointConnectionString(activeConnectionString);
+        CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
+        await ExecuteQuery(sysConn, sql, vertical);
+    }
+    else if (IsQueryable(sql))
+        await ExecuteQuery(connection, sql, vertical);
+    else if (IsServerLevelDDL(sql))
+    {
+        string sysCs = GetEndpointConnectionString(activeConnectionString);
+        CamusConnection sysConn = await ConnectionHelper.OpenAsync(sysCs);
+        await ExecuteDDL(sysConn, sql);
+    }
+    else if (IsDDL(sql))
+        await ExecuteDDL(connection, sql);
+    else if (IsBeginTx(sql))
+        await ExecuteBeginTx(connection);
+    else if (IsCommitTx(sql))
+        await ExecuteCommitTx(connection);
+    else if (IsRollbackTx(sql))
+        await ExecuteRollbackTx(connection);
+    else
+        await ExecuteNonQuery(connection, sql);
 }
 
 static IEnumerable<(string Sql, bool Vertical)> EscapeStringIntoLines(string input)
 {
-    StringBuilder currentLine = new();
-    bool inSingleQuote = false, inDoubleQuote = false;
+    SqlScanner scanner = new();
 
-    for (int i = 0; i < input.Length; i++)
-    {
-        char c = input[i];
+    foreach (SqlStatement statement in scanner.Feed(input))
+        yield return (statement.Sql, statement.Vertical);
 
-        // Check for escaped quotes
-        if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '\'' || input[i + 1] == '\"'))
-        {
-            currentLine.Append(c); // Append the escape character
-            currentLine.Append(input[++i]); // Append the quote and skip next character
-            continue;
-        }
-
-        // MySQL-style \G terminator: ends the statement and requests vertical output.
-        if (c == '\\' && i + 1 < input.Length && input[i + 1] == 'G' && !inSingleQuote && !inDoubleQuote)
-        {
-            i++; // skip the 'G'
-            yield return (currentLine.ToString().Trim(), true);
-            currentLine.Clear();
-            continue;
-        }
-
-        if (c == '\'' && !inDoubleQuote)
-        {
-            inSingleQuote = !inSingleQuote;
-        }
-        else if (c == '\"' && !inSingleQuote)
-        {
-            inDoubleQuote = !inDoubleQuote;
-        }
-
-        if (c == ';' && !inSingleQuote && !inDoubleQuote)
-        {
-            yield return (currentLine.ToString().Trim(), false);
-            currentLine.Clear();
-        }
-        else
-        {
-            currentLine.Append(c);
-        }
-    }
-
-    if (currentLine.Length > 0)
-        yield return (currentLine.ToString().Trim(), false);
+    foreach (SqlStatement statement in scanner.Flush())
+        yield return (statement.Sql, statement.Vertical);
 }
 
 static char FoldSmartQuote(char c) => c switch
@@ -847,52 +953,26 @@ static string NormalizeSmartQuotes(string input)
     return sb?.ToString() ?? input;
 }
 
+// True while what's been typed so far can't stand on its own, so the prompt should keep reading.
+// Shares the splitter's scanner: whether a ';' terminates a statement and whether a statement is
+// finished are the same question, and answering them differently is how a ';' inside a comment or a
+// `quoted identifier` ends up confusing the shell.
 static bool IsSqlIncomplete(string input)
 {
-    string trimmed = input.Trim();
-
-    if (string.IsNullOrEmpty(trimmed))
+    if (string.IsNullOrWhiteSpace(input))
         return false;
 
-    int parenDepth = 0;
-    bool inSingleQuote = false;
-    bool inDoubleQuote = false;
+    SqlScanner scanner = new();
 
-    for (int i = 0; i < input.Length; i++)
+    // Only what dangles after the last ';' matters here — statements it completed are already whole.
+    foreach (SqlStatement _ in scanner.Feed(input))
     {
-        char c = input[i];
-
-        if (c == '\\' && i + 1 < input.Length && (input[i + 1] == '\'' || input[i + 1] == '"'))
-        {
-            i++;
-            continue;
-        }
-
-        if (c == '\'' && !inDoubleQuote)
-        {
-            inSingleQuote = !inSingleQuote;
-            continue;
-        }
-
-        if (c == '"' && !inSingleQuote)
-        {
-            inDoubleQuote = !inDoubleQuote;
-            continue;
-        }
-
-        if (inSingleQuote || inDoubleQuote)
-            continue;
-
-        if (c == '(')
-            parenDepth++;
-        else if (c == ')' && parenDepth > 0)
-            parenDepth--;
     }
 
-    if (inSingleQuote || inDoubleQuote || parenDepth > 0)
+    if (scanner.InsideQuotes || scanner.InsideBlockComment || scanner.ParenDepth > 0)
         return true;
 
-    return trimmed.EndsWith(',');
+    return scanner.HasPendingContent && scanner.LastContentChar == ',';
 }
 
 static async Task SaveHistory(string historyPath, List<string>? history)
@@ -1048,6 +1128,344 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
         AnsiConsole.Write(table);
 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+}
+
+// Runs one `backup …` subcommand against the node's backup admin API. A usage mistake is reported and
+// swallowed the way `use` does it; a server-side failure is left to propagate, so it reaches
+// WriteStatementError with its CADB code and aborts a script the way a failed statement does.
+async Task ExecuteBackup(string arguments)
+{
+    string[] parts = arguments.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+    if (parts.Length == 0 || string.Equals(parts[0], "help", StringComparison.InvariantCultureIgnoreCase))
+    {
+        WriteBackupUsage();
+        return;
+    }
+
+    string subcommand = parts[0].ToLowerInvariant();
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    switch (subcommand)
+    {
+        case "full":
+        case "coordinated":
+        {
+            if (parts.Length > 1)
+            {
+                AnsiConsole.MarkupLine("[red]Usage: backup {0}[/]\n", subcommand);
+                return;
+            }
+
+            CamusBackupInfo info = subcommand == "full"
+                ? await connection.Backups.TakeFullBackupAsync()
+                : await connection.Backups.TakeCoordinatedBackupAsync();
+
+            WriteBackupInfo(info, stopwatch.Elapsed);
+            return;
+        }
+
+        case "incremental":
+        {
+            if (parts.Length != 2)
+            {
+                AnsiConsole.MarkupLine("[red]Usage: backup incremental <parent-backup-id>[/]\n");
+                return;
+            }
+
+            CamusBackupInfo info = await connection.Backups.TakeIncrementalBackupAsync(TrimBackupId(parts[1]));
+
+            WriteBackupInfo(info, stopwatch.Elapsed);
+            return;
+        }
+
+        case "list":
+        {
+            if (parts.Length > 1)
+            {
+                AnsiConsole.MarkupLine("[red]Usage: backup list[/]\n");
+                return;
+            }
+
+            IReadOnlyList<CamusBackupInfo> catalog = await connection.Backups.ListBackupsAsync();
+
+            WriteBackupList(catalog, stopwatch.Elapsed);
+            return;
+        }
+
+        case "chain":
+        {
+            if (parts.Length != 2)
+            {
+                AnsiConsole.MarkupLine("[red]Usage: backup chain <leaf-backup-id>[/]\n");
+                return;
+            }
+
+            IReadOnlyList<CamusBackupInfo> chain = await connection.Backups.GetChainAsync(TrimBackupId(parts[1]));
+
+            WriteBackupList(chain, stopwatch.Elapsed);
+            WriteRecoverableWindow(chain);
+            return;
+        }
+
+        case "gc":
+        {
+            bool preview = parts.Length == 2 &&
+                (string.Equals(parts[1], "preview", StringComparison.InvariantCultureIgnoreCase) ||
+                 string.Equals(parts[1], "--dry-run", StringComparison.InvariantCultureIgnoreCase));
+
+            if (parts.Length > 1 && !preview)
+            {
+                AnsiConsole.MarkupLine("[red]Usage: backup gc [[preview]][/]\n");
+                return;
+            }
+
+            CamusBackupGcResult result = preview
+                ? await connection.Backups.PreviewGarbageCollectionAsync()
+                : await connection.Backups.CollectGarbageAsync();
+
+            WriteBackupGcResult(result, stopwatch.Elapsed);
+            return;
+        }
+
+        default:
+            AnsiConsole.MarkupLine("[red]Unknown backup command: {0}[/]\n", Markup.Escape(parts[0]));
+            WriteBackupUsage();
+            return;
+    }
+}
+
+// True for the shell's `backup …` family, with everything after the verb handed back as arguments.
+static bool IsBackupCommand(string sql, out string arguments)
+{
+    arguments = "";
+
+    string trimmedSql = sql.Trim().TrimEnd(';').Trim();
+
+    if (!trimmedSql.StartsWith("backup", StringComparison.InvariantCultureIgnoreCase))
+        return false;
+
+    // Only the bare verb or the verb followed by a separator — never a table named `backups`.
+    if (trimmedSql.Length > 6 && !char.IsWhiteSpace(trimmedSql[6]))
+        return false;
+
+    arguments = trimmedSql.Length > 6 ? trimmedSql[6..].Trim() : "";
+    return true;
+}
+
+// Backup ids are GUIDs, but they're routinely copied out of a quoted context; accept those spellings
+// rather than sending the quotes on to the server as part of the id.
+static string TrimBackupId(string backupId) => backupId.Trim().Trim('\'', '"', '`');
+
+static void WriteBackupUsage()
+{
+    AnsiConsole.MarkupLine("[white]Backup commands[/] [grey58](node-wide: every database on the server is captured)[/]");
+    AnsiConsole.MarkupLine("  [cyan]backup full[/]                            take a full backup");
+    AnsiConsole.MarkupLine("  [cyan]backup incremental <parent-backup-id>[/]  chain an incremental onto a backup");
+    AnsiConsole.MarkupLine("  [cyan]backup coordinated[/]                     take a cluster-wide consistent backup");
+    AnsiConsole.MarkupLine("  [cyan]backup list[/]                            list the node's backup catalog");
+    AnsiConsole.MarkupLine("  [cyan]backup chain <leaf-backup-id>[/]          resolve and validate a restore chain");
+    AnsiConsole.MarkupLine("  [cyan]backup gc preview[/]                      report what retention would reclaim");
+    AnsiConsole.MarkupLine("  [cyan]backup gc[/]                              run retention now\n");
+}
+
+// One backup, reported field by field: a take is a single result, and the columns of a catalog listing
+// would leave most of the width empty.
+static void WriteBackupInfo(CamusBackupInfo info, TimeSpan elapsed)
+{
+    List<(string Name, string Value)> fields =
+    [
+        ("Backup Id", info.BackupId),
+        ("Type", info.ActualKind is { Length: > 0 } kind ? kind : info.Type),
+        ("Created (UTC)", FormatUtc(info.CreatedAtUtc)),
+        ("Parent", info.ParentBackupId ?? "(none)"),
+        ("Partitions", info.PartitionCount.ToString(CultureInfo.InvariantCulture)),
+    ];
+
+    if (info.ClusterId is { Length: > 0 } clusterId)
+        fields.Add(("Cluster", clusterId));
+
+    if (info.CoordinatorNode is { Length: > 0 } coordinator)
+        fields.Add(("Coordinator", coordinator));
+
+    // The coordinated cut's HLC — the point in time every partition was captured at. An embedded
+    // single node reports an all-zero cut, which says nothing worth a line of its own.
+    if (info.ClusterSnapshotPhysical is > 0)
+        fields.Add(("Snapshot HLC", $"{info.ClusterSnapshotNode}:{info.ClusterSnapshotPhysical}:{info.ClusterSnapshotCounter}"));
+
+    int nameWidth = fields.Max(f => f.Name.Length);
+
+    foreach ((string name, string value) in fields)
+        AnsiConsole.MarkupLine("[blue]{0}[/]: {1}", Markup.Escape(name.PadLeft(nameWidth)), Markup.Escape(value));
+
+    // The call succeeded but cost a full image rather than an increment — worth saying out loud, since
+    // the whole point of asking for an incremental was to avoid that.
+    if (info.WasSubstituted)
+    {
+        AnsiConsole.MarkupLine(
+            "[yellow]Requested {0}, the server took {1}: {2}[/]",
+            Markup.Escape(info.RequestedKind ?? "?"),
+            Markup.Escape(info.ActualKind ?? "?"),
+            Markup.Escape(info.SubstitutionReason ?? "no reason reported"));
+    }
+
+    AnsiConsole.MarkupLine("Backup OK ({0})\n", elapsed);
+}
+
+static void WriteBackupList(IReadOnlyList<CamusBackupInfo> backups, TimeSpan elapsed)
+{
+    if (backups.Count > 0)
+    {
+        Table table = new()
+        {
+            Border = TableBorder.Square
+        };
+
+        table.AddColumn("Backup Id");
+        table.AddColumn("Type");
+        table.AddColumn("Created (UTC)");
+        table.AddColumn("Parent");
+        table.AddColumn("Partitions");
+        table.AddColumn("Status");
+
+        foreach (CamusBackupInfo info in backups)
+        {
+            table.AddRow(
+                Markup.Escape(info.BackupId),
+                Markup.Escape(info.ActualKind is { Length: > 0 } kind ? kind : info.Type),
+                Markup.Escape(info.IsInvalid ? "" : FormatUtc(info.CreatedAtUtc)),
+                Markup.Escape(info.ParentBackupId ?? ""),
+                Markup.Escape(info.IsInvalid ? "" : info.PartitionCount.ToString(CultureInfo.InvariantCulture)),
+                DescribeBackupStatus(info));
+        }
+
+        AnsiConsole.Write(table);
+    }
+
+    AnsiConsole.MarkupLine("[blue]{0}[/] backups in set ({1})\n", backups.Count, elapsed);
+}
+
+// A listing fails open on a single unreadable manifest, so an entry can be present but meaningless;
+// say which, rather than printing a row of blanks with no explanation.
+static string DescribeBackupStatus(CamusBackupInfo info)
+{
+    if (info.IsInvalid)
+        return $"[red]invalid: {Markup.Escape(info.InvalidReason ?? "unreadable manifest")}[/]";
+
+    if (info.WasSubstituted)
+        return $"[yellow]substituted from {Markup.Escape(info.RequestedKind ?? "?")}[/]";
+
+    return "[green]ok[/]";
+}
+
+// The window a point-in-time restore may target. The server reports it on the chain's root, not its
+// leaf, so it is a property of the resolved chain and belongs under the table rather than in a column.
+static void WriteRecoverableWindow(IReadOnlyList<CamusBackupInfo> chain)
+{
+    if (chain.Count == 0)
+        return;
+
+    CamusBackupInfo root = chain[0];
+
+    // A chain the server reports no coverage for — a freshly taken backup on an idle node has none —
+    // comes back as null or as epoch 0. Printing "1970-01-01" for that would read as a real window.
+    if (root.MinRecoverablePhysicalMs is not long from || root.MaxRecoverablePhysicalMs is not long to || from <= 0 || to <= 0)
+        return;
+
+    AnsiConsole.MarkupLine(
+        "Recoverable window (UTC): [white]{0}[/] .. [white]{1}[/]\n",
+        Markup.Escape(FormatEpochMs(from)),
+        Markup.Escape(FormatEpochMs(to)));
+}
+
+static void WriteBackupGcResult(CamusBackupGcResult result, TimeSpan elapsed)
+{
+    List<CamusBackupGcDeletion> deletions = result.RetentionDeletions ?? [];
+    List<CamusBackupGcOrphan> orphans = result.OrphanReclamations ?? [];
+
+    if (deletions.Count > 0)
+    {
+        Table table = new()
+        {
+            Border = TableBorder.Square
+        };
+
+        table.AddColumn("Backup Id");
+        table.AddColumn("Type");
+        table.AddColumn("Created (UTC)");
+        table.AddColumn("Size");
+        table.AddColumn("Reason");
+
+        foreach (CamusBackupGcDeletion deletion in deletions)
+        {
+            table.AddRow(
+                Markup.Escape(deletion.BackupId),
+                Markup.Escape(deletion.Type),
+                Markup.Escape(FormatUtc(deletion.CreatedAtUtc)),
+                Markup.Escape(FormatBytes(deletion.Bytes)),
+                Markup.Escape(deletion.Reason));
+        }
+
+        AnsiConsole.Write(table);
+    }
+
+    if (orphans.Count > 0)
+    {
+        Table table = new()
+        {
+            Border = TableBorder.Square
+        };
+
+        table.AddColumn("Orphan");
+        table.AddColumn("Kind");
+        table.AddColumn("Reason");
+
+        foreach (CamusBackupGcOrphan orphan in orphans)
+        {
+            table.AddRow(
+                Markup.Escape(orphan.Name),
+                orphan.IsDirectory ? "directory" : "file",
+                Markup.Escape(orphan.Reason));
+        }
+
+        AnsiConsole.Write(table);
+    }
+
+    // A preview deleted nothing; saying "reclaimed" there would be a lie an operator acts on.
+    string verb = result.Applied ? "reclaimed" : "would reclaim";
+
+    AnsiConsole.MarkupLine(
+        "{0}: [blue]{1}[/] backups, [blue]{2}[/] orphans, [blue]{3}[/] {4} ({5})\n",
+        result.Applied ? "Retention applied" : "Retention preview",
+        deletions.Count,
+        orphans.Count,
+        Markup.Escape(FormatBytes(result.BytesReclaimed)),
+        verb,
+        elapsed);
+}
+
+static string FormatUtc(DateTime value)
+    => value.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+static string FormatEpochMs(long epochMs)
+    => FormatUtc(DateTimeOffset.FromUnixTimeMilliseconds(epochMs).UtcDateTime);
+
+static string FormatBytes(long bytes)
+{
+    string[] units = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+    double size = bytes;
+    int unit = 0;
+
+    while (size >= 1024 && unit < units.Length - 1)
+    {
+        size /= 1024;
+        unit++;
+    }
+
+    return unit == 0
+        ? $"{bytes} B"
+        : string.Format(CultureInfo.InvariantCulture, "{0:0.##} {1}", size, units[unit]);
 }
 
 // Reports a failed statement: the exception, the server's error code, a caret under the offending
@@ -1328,7 +1746,25 @@ static bool ChangesTableSet(string sql)
     string trimmedSql = sql.TrimStart();
 
     return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase);
+           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
+           IsViewDDL(trimmedSql);
+}
+
+// View and materialized-view DDL. CREATE OR REPLACE and ALTER … RENAME change what a name
+// resolves to, so all of these also trigger a completion-cache refresh via ChangesTableSet.
+static bool IsViewDDL(string sql)
+{
+    string trimmedSql = sql.Trim();
+
+    return trimmedSql.StartsWith("create view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("create or replace view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("create materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("create or replace materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("drop materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("alter view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("alter materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
+           trimmedSql.StartsWith("refresh materialized view ", StringComparison.InvariantCultureIgnoreCase);
 }
 
 static bool IsDDL(string sql)
@@ -1336,6 +1772,7 @@ static bool IsDDL(string sql)
     string trimmedSql = sql.Trim();
 
     return IsServerLevelDDL(trimmedSql) ||
+           IsViewDDL(trimmedSql) ||
            trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
@@ -1361,15 +1798,20 @@ static List<string> BuildConnectionAttempts(Options opts, string? user, string? 
             return [cs];
 
         // No protocol given: try gRPC against their endpoint, then REST against the same endpoint.
-        return [WithProtocol(cs, "grpc"), WithProtocol(cs, "rest")];
+        // The gRPC attempt carries the same endpoint as its BackupEndpoint, because that is exactly
+        // where REST is being tried next — the backup admin API speaks HTTP only.
+        return [WithBackupEndpoint(WithProtocol(cs, "grpc"), GetConnValue(cs, "Endpoint")), WithProtocol(cs, "rest")];
     }
 
     string db = opts.Database ?? "";
 
-    // No connection string at all: use the well-known local ports for each transport.
+    // No connection string at all: use the well-known local ports for each transport. The gRPC
+    // attempt names the well-known HTTP port for backups, which is on a different port than gRPC.
     return
     [
-        WithCredentials($"Endpoint=http://localhost:{DefaultGrpcPort};Database={db};Protocol=grpc", user, password, token),
+        WithCredentials(
+            WithBackupEndpoint($"Endpoint=http://localhost:{DefaultGrpcPort};Database={db};Protocol=grpc", $"http://localhost:{DefaultRestPort}"),
+            user, password, token),
         WithCredentials($"Endpoint=http://localhost:{DefaultRestPort};Database={db};Protocol=rest", user, password, token),
     ];
 }
@@ -1441,6 +1883,22 @@ static string EnsureDatabase(string connectionString)
 static string WithProtocol(string connectionString, string protocol)
 {
     return WithKey(connectionString, "Protocol", protocol);
+}
+
+// Points `backup …` at an HTTP endpoint on a gRPC connection: the backup admin API is REST-only, so
+// without this every backup command on the shell's default (gRPC) connection would fail asking for the
+// key. An endpoint the user set themselves is left alone, and so is an `Endpoint=` pool's tail — a
+// backup goes to one node, and for a coordinated one that node has to be the coordinator, so pinning
+// it deliberately is the caller's job.
+static string WithBackupEndpoint(string connectionString, string? endpoint)
+{
+    if (HasKey(connectionString, "BackupEndpoint") || string.IsNullOrWhiteSpace(endpoint))
+        return connectionString;
+
+    string first = endpoint.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        .FirstOrDefault() ?? endpoint;
+
+    return WithKey(connectionString, "BackupEndpoint", first);
 }
 
 // Returns the connection string with key=value set, replacing any existing occurrence of the key.
@@ -1589,8 +2047,10 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -u, --user / -p, --password   Credentials for an authenticated server");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Shell commands:[/]");
-    AnsiConsole.MarkupLine("  [cyan]use[/] <database>              Switch the current database");
-    AnsiConsole.MarkupLine("  [cyan]source[/] <file>               Run the statements in a file");
+    AnsiConsole.MarkupLine("  [cyan]use[/] <database>              Switch the current database; the name may be");
+    AnsiConsole.MarkupLine("                                [cyan]`backticked`[/]. Works in script files too");
+    AnsiConsole.MarkupLine("  [cyan]source[/] <file> [[--force]]     Run the statements in a file, streaming it;");
+    AnsiConsole.MarkupLine("                                [cyan]--force[/] carries on past failures");
     AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
     AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
     AnsiConsole.MarkupLine("  [cyan]clear[/] / [cyan]exit[/] / [cyan]quit[/]         Clear the screen / leave the shell");
@@ -1641,6 +2101,245 @@ static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
             "-v" => "--version",
             _ => arg
         };
+    }
+}
+
+// One statement pulled out of a script, with the line it started on so an error can point at it.
+public readonly record struct SqlStatement(string Sql, bool Vertical, int Line);
+
+// Splits SQL text into statements, tracking where a ';' actually terminates one: not inside a
+// string, a `quoted identifier`, or a comment. Holding the state in an object (rather than
+// re-scanning a whole string) lets callers feed a file line by line instead of loading it whole,
+// and lets the prompt ask whether what's been typed so far is finished.
+public sealed class SqlScanner
+{
+    private readonly StringBuilder current = new();
+
+    private bool inSingleQuote, inDoubleQuote, inBacktick, inLineComment, inBlockComment;
+    private int parenDepth;
+
+    // The line the scanner is reading, and the one the pending statement's first real character
+    // sat on — leading blank lines and comments shouldn't shift the reported location.
+    private int line = 1;
+    private int statementLine = 1;
+
+    private bool hasContent;
+    private char lastContentChar;
+
+    /// <summary>Inside a string literal or a quoted identifier, so the statement can't be over.</summary>
+    public bool InsideQuotes => inSingleQuote || inDoubleQuote || inBacktick;
+
+    /// <summary>Inside an unterminated /* … */. A line comment self-terminates, so it doesn't count.</summary>
+    public bool InsideBlockComment => inBlockComment;
+
+    public int ParenDepth => parenDepth;
+
+    /// <summary>The pending text holds something other than whitespace and comments.</summary>
+    public bool HasPendingContent => hasContent;
+
+    /// <summary>Last non-whitespace character outside a comment, for spotting a trailing comma.</summary>
+    public char LastContentChar => lastContentChar;
+
+    /// <summary>
+    /// Consumes a chunk of SQL and yields whatever statements it completed. Two-character tokens
+    /// (--, /*, */, \G, doubled quotes) are looked up within the chunk, so callers must not split a
+    /// chunk mid-token; feeding whole lines is always safe, since none of them can span a newline.
+    /// </summary>
+    public IEnumerable<SqlStatement> Feed(string text)
+    {
+        for (int i = 0; i < text.Length; i++)
+        {
+            char c = text[i];
+            char next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+            if (inLineComment)
+            {
+                Skip(c);
+
+                if (c == '\n')
+                    inLineComment = false;
+
+                continue;
+            }
+
+            if (inBlockComment)
+            {
+                Skip(c);
+
+                if (c == '*' && next == '/')
+                {
+                    Skip(next);
+                    i++;
+                    inBlockComment = false;
+                }
+
+                continue;
+            }
+
+            if (InsideQuotes)
+            {
+                // Backslash escapes a character inside a string literal, but a backtick-quoted
+                // identifier has no escape other than doubling.
+                if (c == '\\' && next != '\0' && !inBacktick)
+                {
+                    Append(c, content: true);
+                    Append(next, content: true);
+                    i++;
+                    continue;
+                }
+
+                char delimiter = inSingleQuote ? '\'' : inDoubleQuote ? '"' : '`';
+
+                if (c == delimiter)
+                {
+                    // A doubled delimiter ('' "" ``) is a literal one, not the end of the quote.
+                    if (next == delimiter)
+                    {
+                        Append(c, content: true);
+                        Append(next, content: true);
+                        i++;
+                        continue;
+                    }
+
+                    inSingleQuote = inDoubleQuote = inBacktick = false;
+                }
+
+                Append(c, content: true);
+                continue;
+            }
+
+            // -- only opens a comment when whitespace follows it, so `a--b` stays arithmetic. The end
+            // of a chunk counts as whitespace: callers feed lines, and a trailing -- ends the line.
+            if (c == '-' && next == '-' && (i + 2 >= text.Length || char.IsWhiteSpace(text[i + 2])))
+            {
+                OpenComment();
+                Skip(c);
+                Skip(next);
+                inLineComment = true;
+                i++;
+                continue;
+            }
+
+            if (c == '#')
+            {
+                OpenComment();
+                Skip(c);
+                inLineComment = true;
+                continue;
+            }
+
+            if (c == '/' && next == '*')
+            {
+                OpenComment();
+                Skip(c);
+                Skip(next);
+                inBlockComment = true;
+                i++;
+                continue;
+            }
+
+            if (c is '\'' or '"' or '`')
+            {
+                inSingleQuote = c == '\'';
+                inDoubleQuote = c == '"';
+                inBacktick = c == '`';
+                Append(c, content: true);
+                continue;
+            }
+
+            // MySQL-style \G terminator: ends the statement and requests vertical output.
+            if (c == '\\' && next == 'G')
+            {
+                i++;
+
+                if (TryTake(vertical: true, out SqlStatement verticalStatement))
+                    yield return verticalStatement;
+
+                continue;
+            }
+
+            if (c == ';')
+            {
+                if (TryTake(vertical: false, out SqlStatement statement))
+                    yield return statement;
+
+                continue;
+            }
+
+            if (c == '(')
+                parenDepth++;
+            else if (c == ')' && parenDepth > 0)
+                parenDepth--;
+
+            Append(c, content: true);
+        }
+    }
+
+    /// <summary>Yields a final statement left unterminated at the end of the input, if any.</summary>
+    public IEnumerable<SqlStatement> Flush()
+    {
+        if (TryTake(vertical: false, out SqlStatement statement))
+            yield return statement;
+    }
+
+    private void Append(char c, bool content)
+    {
+        current.Append(c);
+
+        if (content && !char.IsWhiteSpace(c))
+        {
+            if (!hasContent)
+            {
+                statementLine = line;
+                hasContent = true;
+            }
+
+            lastContentChar = c;
+        }
+
+        if (c == '\n')
+            line++;
+    }
+
+    // Comment text is dropped rather than forwarded: servers disagree on which comment syntaxes they
+    // accept (CamusDB rejects '#'), and a dump full of them shouldn't fail on that. Newlines survive
+    // so the statement keeps its shape and the server's "line N, col M" still lands on the right row.
+    private void Skip(char c)
+    {
+        if (c == '\n')
+        {
+            current.Append(c);
+            line++;
+        }
+    }
+
+    // A comment can sit between two tokens (a/*x*/b), so leave a separator where it was.
+    private void OpenComment()
+    {
+        current.Append(' ');
+    }
+
+    private bool TryTake(bool vertical, out SqlStatement statement)
+    {
+        string sql = current.ToString().Trim();
+        int at = statementLine;
+        bool any = hasContent;
+
+        current.Clear();
+        parenDepth = 0;
+        hasContent = false;
+        lastContentChar = '\0';
+        statementLine = line;
+
+        // Nothing but whitespace and comments: an empty ";;", or a trailing comment at end of file.
+        if (!any)
+        {
+            statement = default;
+            return false;
+        }
+
+        statement = new SqlStatement(sql, vertical, at);
+        return true;
     }
 }
 

@@ -11,15 +11,16 @@ using RadLine;
 
 /// <summary>
 /// Provides Tab-completion for the SQL shell. Completion is context-aware: when the
-/// word being typed follows a keyword that expects a table name (from, into, update,
-/// join, table, describe...), the cached list of table names is offered instead of the
-/// static SQL vocabulary. Table names are loaded lazily via "show tables" and refreshed
-/// whenever the active database changes.
+/// word being typed follows a keyword that expects a table or view name (from, into,
+/// update, join, table, view, describe...), the cached list of table, view and
+/// materialized-view names is offered instead of the static SQL vocabulary. Names are
+/// loaded lazily via "show tables" / "show views" / "show materialized views" and
+/// refreshed whenever the active database changes.
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
     // Keywords that, when they immediately precede the word being typed, mean the user
-    // is most likely referring to a table.
+    // is most likely referring to a table or view.
     private static readonly HashSet<string> TableContextKeywords = new(StringComparer.OrdinalIgnoreCase)
     {
         "from",
@@ -27,6 +28,7 @@ internal sealed class SqlCompletion : ITextCompletion
         "update",
         "join",
         "table",
+        "view",
         "desc",
         "describe",
     };
@@ -71,17 +73,32 @@ internal sealed class SqlCompletion : ITextCompletion
     private static bool IsWordBoundary(char c) => char.IsWhiteSpace(c) || c is ',' or '(' or ';';
 
     /// <summary>
-    /// Loads the table names for the active database into the completion cache. Failures
-    /// (no database selected, connection issues, unsupported command) are swallowed so
-    /// completion degrades gracefully to the static vocabulary.
+    /// Loads the table and view names for the active database into the completion cache.
+    /// Each command fails independently (no database selected, connection issues, a server
+    /// that predates views), so completion degrades gracefully to whatever could be loaded,
+    /// and ultimately to the static vocabulary.
     /// </summary>
     public async Task RefreshTablesAsync(CamusConnection connection)
     {
+        List<string> names = new();
+
+        bool loadedAny = await LoadNamesAsync(connection, "show tables", names);
+        loadedAny |= await LoadNamesAsync(connection, "show views", names);
+        loadedAny |= await LoadNamesAsync(connection, "show materialized views", names);
+
+        if (!loadedAny)
+            return; // Keep whatever we had; completion falls back to keywords.
+
+        _tables = names.Distinct(StringComparer.OrdinalIgnoreCase)
+                       .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                       .ToArray();
+    }
+
+    private static async Task<bool> LoadNamesAsync(CamusConnection connection, string sql, List<string> names)
+    {
         try
         {
-            List<string> names = new();
-
-            using CamusCommand cmd = connection.CreateSelectCommand("show tables");
+            using CamusCommand cmd = connection.CreateSelectCommand(sql);
             cmd.CommandTimeout = 10;
 
             CamusDataReader reader = await cmd.ExecuteReaderAsync();
@@ -95,13 +112,11 @@ internal sealed class SqlCompletion : ITextCompletion
                     names.Add(name);
             }
 
-            _tables = names.Distinct(StringComparer.OrdinalIgnoreCase)
-                           .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                           .ToArray();
+            return true;
         }
         catch
         {
-            // Keep whatever we had; completion falls back to keywords.
+            return false;
         }
     }
 }
