@@ -376,6 +376,16 @@ if (richEditorSupported)
         "engine",
         "stats",
         "variables",
+        // SHOW STATISTICS FOR [TABLE] <table>: the optimizer's advisory table statistics. The server
+        // matches STATISTICS as a plain identifier so it stays usable as a name, but the editor
+        // colors it like the rest of the SHOW vocabulary.
+        "statistics",
+        // SET/RESET CLUSTER SETTING and SHOW CLUSTER SETTINGS. Both spellings of the last word are
+        // listed because the statements differ: SETTING for the mutations, SETTINGS for the listing.
+        "cluster",
+        "setting",
+        "settings",
+        "reset",
         "view",
         "views",
         "materialized",
@@ -401,6 +411,12 @@ if (richEditorSupported)
         "gen_uuid_v7",
         "current_timestamp",
         "now",
+        // Session functions: what session the statement runs in. They take no arguments and are
+        // rejected as column defaults and CHECK conditions, which replay with no session behind them.
+        "current_database",
+        "current_user",
+        "current_role",
+        "is_superuser",
         "current_date",
         "date_add",
         "date_diff",
@@ -563,6 +579,23 @@ Console.CancelKeyPress += delegate
 
 if (sqlCompletion is not null && HasDatabase(activeConnectionString))
     await sqlCompletion.RefreshTablesAsync(connection);
+
+// Configuration keys come over the endpoint connection rather than the database one, because the
+// statements they complete need no database either — the keys are offered even in a session that
+// never runs `use`. Best-effort: completion falling back to the static vocabulary is not worth
+// keeping the user from a prompt over.
+if (sqlCompletion is not null)
+{
+    try
+    {
+        CamusConnection settingsConnection = await ConnectionHelper.OpenAsync(GetEndpointConnectionString(activeConnectionString));
+        await sqlCompletion.RefreshSettingsAsync(settingsConnection);
+    }
+    catch (Exception)
+    {
+        // Ignored: the shell is already connected, and this cache is a convenience.
+    }
+}
 
 StringBuilder pendingSql = new();
 
@@ -1701,7 +1734,10 @@ static bool IsSystemLevelQuery(string sql)
            trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase) ||
            trimmedSql.StartsWith("show engine stats", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show variables", StringComparison.InvariantCultureIgnoreCase);
+           trimmedSql.StartsWith("show variables", StringComparison.InvariantCultureIgnoreCase) ||
+           // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
+           // it runs on the endpoint connection and answers in a session that never ran `use`.
+           StartsWithWords(trimmedSql, "show", "cluster", "settings");
 }
 
 // User and grant administration is server-level: like database DDL, these statements name their
@@ -1718,11 +1754,53 @@ static bool IsUserAdmin(string sql)
            trimmedSql.StartsWith("revoke ", StringComparison.InvariantCultureIgnoreCase);
 }
 
-// Everything the server dispatches before opening a database — database lifecycle DDL plus user
-// and grant administration.
+// Everything the server dispatches before opening a database — database lifecycle DDL, user and
+// grant administration, plus runtime cluster settings.
 static bool IsServerLevelDDL(string sql)
 {
-    return IsDatabaseDDL(sql) || IsUserAdmin(sql);
+    return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql);
+}
+
+// Runtime cluster settings are server-level for the same reasons user administration is: the key is
+// named inside the SQL, the change lands in the shared settings keyspace (replicated through the
+// settings log in cluster mode), and the statement returns no database descriptor — so it runs on a
+// database-less connection and needs no current database.
+//
+// CLUSTER and SETTING are plain identifiers to the parser rather than keywords, so the whole
+// three-word prefix is matched here instead of a single verb: SET alone is also how SET TRANSACTION
+// starts, and that one is database-scoped.
+static bool IsClusterSettingsAdmin(string sql)
+{
+    return StartsWithWords(sql, "set", "cluster", "setting") ||
+           StartsWithWords(sql, "reset", "cluster", "setting");
+}
+
+// True when `sql` opens with exactly these words in order, separated by any run of whitespace. The
+// prefixes it matches are three words long and typed by hand at a prompt, where the single-space
+// StartsWith spelling used for the older statements would quietly miss `SET  CLUSTER SETTING` and
+// send it down the needs-a-database path. Each word must end at a boundary, so `SET` does not match
+// the head of `SETTINGS`, and the last word may end the statement (`SHOW CLUSTER SETTINGS`) or be
+// followed by more of it (the key after `SETTING`).
+static bool StartsWithWords(string sql, params string[] words)
+{
+    string trimmedSql = sql.TrimStart();
+    int position = 0;
+
+    foreach (string word in words)
+    {
+        if (string.Compare(trimmedSql, position, word, 0, word.Length, StringComparison.InvariantCultureIgnoreCase) != 0)
+            return false;
+
+        position += word.Length;
+
+        if (position < trimmedSql.Length && !char.IsWhiteSpace(trimmedSql[position]) && trimmedSql[position] != ';')
+            return false;
+
+        while (position < trimmedSql.Length && char.IsWhiteSpace(trimmedSql[position]))
+            position++;
+    }
+
+    return true;
 }
 
 // Statements the server dispatches before opening a database (StatementScope.IsDatabaseScopedMutation):
@@ -2054,6 +2132,24 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
     AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
     AnsiConsole.MarkupLine("  [cyan]clear[/] / [cyan]exit[/] / [cyan]quit[/]         Clear the screen / leave the shell");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Cluster settings:[/] [grey58](SQL, not shell commands; each runs without a current database)[/]");
+    AnsiConsole.MarkupLine("  [cyan]show variables[/] [[like '<pattern>']]");
+    AnsiConsole.MarkupLine("                                This node's effective configuration, with each");
+    AnsiConsole.MarkupLine("                                setting's [white]mutability[/] (runtime|restart) and [white]scope[/]");
+    AnsiConsole.MarkupLine("  [cyan]show cluster settings[/] [[like '<pattern>']]");
+    AnsiConsole.MarkupLine("                                What the cluster overlay currently carries");
+    AnsiConsole.MarkupLine("  [cyan]set cluster setting[/] <key> = <value>");
+    AnsiConsole.MarkupLine("                                Change a runtime setting fleet-wide, from any node");
+    AnsiConsole.MarkupLine("  [cyan]reset cluster setting[/] <key>   Drop the overlay entry; each node resolves the key");
+    AnsiConsole.MarkupLine("                                through its own config again");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Introspection:[/] [grey58](SQL, not shell commands)[/]");
+    AnsiConsole.MarkupLine("  [cyan]show statistics for[/] [[table]] <name>");
+    AnsiConsole.MarkupLine("                                What the optimizer believes about a table: row counts,");
+    AnsiConsole.MarkupLine("                                column min/max, histogram buckets, distinct-value counts,");
+    AnsiConsole.MarkupLine("                                and how stale they are ([cyan]analyze <table>[/] refreshes them)");
+    AnsiConsole.MarkupLine("  [cyan]show engine stats[/]             Runtime engine metrics for the node answering");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");

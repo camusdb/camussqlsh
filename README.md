@@ -390,7 +390,22 @@ explain (analyze) select * from users;
 show tables;
 desc users;
 describe users;
+show statistics for users;
 ```
+
+### Table statistics
+
+`show statistics for <table>` prints what the optimizer believes about a table — the estimated row count, per-column minimum and maximum, histogram bucket counts, approximate distinct values, per-index entry counts, and how stale all of it is. `TABLE` is an optional noise word, so `show statistics for table users` is the same statement.
+
+```sql
+analyze users;                          -- collect histograms and distinct-value counts
+show statistics for users;
+show statistics for users\G             -- ten columns; vertical output is easier to read
+```
+
+One row per statistics target, discriminated by the `kind` column (`table`, `column`, `key`, `index`). A `null` means either "does not apply to this row" or "never collected" — `kind` tells you which. `last_analyzed` and `stale_mutations` describe the whole table and repeat on every row.
+
+The values are the answering node's view and include mutations it has not flushed yet, so in a cluster two nodes may report different values for the same table. Materialized views have statistics of their own; a plain view does not.
 
 DDL statements include:
 
@@ -536,7 +551,7 @@ primary key index indexes constraint limit insert into values delete alter renam
 null not string int64 float64 object_id oid bool boolean is on in or and between like ilike add
 show use tables view views materialized refresh concurrently cascade owner no data columns group
 join inner offset unique having explain analyze begin start transaction commit rollback as
-distinct cast integer double
+distinct cast integer double engine stats statistics for variables cluster setting settings reset
 ```
 
 Colored shell commands:
@@ -561,6 +576,7 @@ Colored scalar functions and aliases:
 
 ```text
 gen_id
+current_database current_user current_role is_superuser
 current_timestamp now current_date date_add date_diff date_part date_trunc unix_timestamp from_unixtime
 abs ceil ceiling floor sqrt pow power mod sign random round
 length lower upper trim ltrim rtrim substring replace contains starts_with ends_with concat
@@ -578,10 +594,14 @@ table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`
 `describe` — the shell suggests the **table and view names** of the current database. In
 any other position it suggests the SQL keywords, functions, and shell commands.
 
+The `for` of `show statistics for` counts as a table position too, decided by the word
+before it: `show grants for` takes a user name, so `for` alone is not enough.
+
 ```sql
-select * from us⇥      -- completes to a table such as "users"
-insert into ⇥          -- cycles through all table names
-sel⇥                   -- completes to "select"
+select * from us⇥              -- completes to a table such as "users"
+insert into ⇥                  -- cycles through all table names
+show statistics for ⇥          -- cycles through all table names
+sel⇥                           -- completes to "select"
 ```
 
 Relation names are loaded from `show tables`, `show views` and `show materialized views`,
