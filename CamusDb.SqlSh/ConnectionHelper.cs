@@ -19,9 +19,13 @@ internal static class ConnectionHelper
             .GroupBy(parts => parts[0], StringComparer.InvariantCultureIgnoreCase)
             .ToDictionary(group => group.Key, group => group.Last()[1], StringComparer.InvariantCultureIgnoreCase);
 
-        if (!values.TryGetValue("Endpoint", out string? endpoint) ||
-            string.IsNullOrWhiteSpace(endpoint) ||
-            !Uri.TryCreate(endpoint, UriKind.Absolute, out _))
+        // Endpoint accepts a comma-separated pool of nodes, which the driver round-robins over, so
+        // each member is validated on its own. The whole value is not a URI.
+        string[] endpoints = values.TryGetValue("Endpoint", out string? endpoint)
+            ? endpoint.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            : [];
+
+        if (endpoints.Length == 0 || endpoints.Any(e => !Uri.TryCreate(e, UriKind.Absolute, out _)))
         {
             throw new ArgumentException("Connection string must include a valid Endpoint. Example: Endpoint=http://localhost:5095");
         }
