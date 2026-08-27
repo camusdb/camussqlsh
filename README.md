@@ -1,6 +1,6 @@
 # CamusDB SQL Shell
 
-`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive mode for running SQL (`-e`/`--execute`) or a whole `.sql` file (`-f`/`--file`) and exiting.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive mode for running SQL (`-e`/`--execute`) or a whole `.sql` file (`-f`/`--file`) and exiting. A full-screen mode (`--tui`) puts the catalog, the editor and the results on one screen.
 
 ## Installation
 
@@ -120,6 +120,7 @@ camus-cli [database] [options]
 | `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
 | `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). |
 | `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
+| `--tui` | Open the full-screen mode: catalog, editor and results in three panes. Needs an ANSI terminal. See [Full-Screen Mode](#full-screen-mode---tui). |
 | `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
 | `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
 | `-h`, `--help` | Show help. |
@@ -363,6 +364,114 @@ Semicolons inside single or double quoted strings do not split statements.
 | `Tab` | Autocomplete the current word (see [Autocompletion](#autocompletion)). |
 | `Ctrl+Tab` | Cycle to the previous completion. |
 
+## Full-Screen Mode (`--tui`)
+
+`--tui` replaces the prompt with a full-screen mode. The screen holds three panes:
+
+1. **Data Catalog**, on the left. It lists the tables of the current database. Expand a table to read its columns and their types.
+2. **Query Editor**, at the top right. It holds the SQL. It colors the SQL with the same word list as the prompt, and it offers the same completions.
+3. **Query Results**, at the bottom right. It shows the rows of the last query. It also keeps one log line for each statement that ran.
+
+A status bar below the panes reports the elapsed time, the row count and any error. A key bar sits at the foot of the screen.
+
+Start the mode with the `--tui` flag:
+
+```shell
+$ camus-cli northwind --tui
+```
+
+```shell
+$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" --tui
+```
+
+The mode needs an ANSI terminal. On a terminal whose `TERM` value Spectre.Console does not recognize, `--tui` prints an error and exits. Add `--force-rich` to start it anyway. See [Terminal Detection](#terminal-detection).
+
+### Keys
+
+These keys work in every pane:
+
+| Key | Action |
+| --- | --- |
+| `Tab` | Move to the next pane. |
+| `Shift+Tab` | Move to the previous pane. |
+| `Shift+Enter` | Run the statements in the editor. See the note below. |
+| `F5` | Run the statements in the editor. |
+| `Ctrl+R` | Run the statements in the editor. |
+| `Esc` | Cancel the query that runs now, or close the help bar. |
+| `F1` | Show or hide the key list. |
+| `F2` | Turn the row cap on or off. See [Row Cap and Paging](#row-cap-and-paging). |
+| `Ctrl+S` | Save the editor text to the query file. |
+| `Ctrl+L` | Empty the editor. |
+| `Ctrl+U` | Empty the editor. |
+| `Ctrl+Q` | Quit. |
+
+These keys work in the Data Catalog pane:
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move the selection. |
+| `Right` / `Enter` | Expand the selected table. |
+| `Left` | Collapse the selected table. |
+| `Home` / `End` | Move to the first or last row. |
+| `Space` | Insert the selected name into the editor at the cursor. |
+
+These keys work in the Query Editor pane:
+
+| Key | Action |
+| --- | --- |
+| `Enter` | Start a new line. |
+| `Up` / `Down` | Move between lines. |
+| `Left` / `Right` | Move the cursor. |
+| `Home` / `End` | Move to the beginning or end of the current line. |
+| `Backspace` / `Delete` | Delete text. |
+| `Ctrl+N` | Complete the current word, or step to the next candidate. |
+| `Ctrl+P` | Step to the previous candidate. |
+
+These keys work in the Query Results pane:
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Scroll one row. |
+| `PageUp` / `PageDown` | Scroll one screen. |
+| `Left` / `Right` | Scroll one whole column. |
+| `Home` | Move to the first row and the first column. |
+| `End` | Move to the last row. |
+
+`Tab` moves between panes, so the editor uses `Ctrl+N` and `Ctrl+P` for completion instead.
+
+`Shift+Enter` needs a terminal that speaks the disambiguating keyboard protocol. Ghostty, Kitty, WezTerm and recent iTerm2 versions all speak it. On any other terminal, `Shift+Enter` starts a new line. `F5` runs the statements on every terminal.
+
+### What the editor runs
+
+`F5` runs every statement in the editor, in order. Separate the statements with semicolons. The Query Results pane keeps one log line for each statement. The grid shows the rows of the last query statement.
+
+The editor accepts the same SQL as the prompt, which includes:
+
+- Query statements, DDL and DML. See [SQL Execution](#sql-execution).
+- `begin`, `commit` and `rollback`. See [Transactions](#transactions).
+- `use <database>`, which reconnects and reloads the catalog.
+- Server-level and system-level statements, such as `show databases`.
+
+A statement that creates or drops a table reloads the catalog by itself.
+
+Backup commands are the one exception. They run at the prompt only. In `--tui` they report an error. See [Backups](#backups).
+
+### Row cap and paging
+
+The results grid does not read a whole table into memory. It reads the first 200 rows, then reads 200 more each time you scroll near the end of what it holds.
+
+A cap of 500 rows is on at start. With the cap on, the grid stops at 500 rows and never reads the rest. Press `F2` to turn the cap off, and the grid then pages through the whole result. The cap is a display cap. It is not a SQL `LIMIT`, so the statement itself is unchanged.
+
+### The query file
+
+The editor text is kept between sessions in a file under the system temporary directory:
+
+```text
+camusdb.query.sql
+```
+
+The mode loads this file at start, and saves it at exit. Press `Ctrl+S` to save it at any time. Press `Ctrl+L` or `Ctrl+U` to empty the editor.
+
 ## History
 
 Executed statements are stored in a JSON history file under the system temporary directory:
@@ -419,8 +528,18 @@ create table users (
 create index users_name on users (name);
 alter table users rename column name to full_name;
 drop index users_name;
+truncate table users;                   -- empties the table; the table itself stays
 drop table users;
 ```
+
+`truncate [table] <table>` deletes every row of a base table in one step. The cost does not grow
+with the row count, because the server replaces the key space the rows live in. The table keeps its
+name, its columns, its indexes and its comments. The `table` keyword is optional, so
+`truncate users` does the same thing.
+
+The server refuses `truncate` inside an explicit transaction. It commits a replicated schema change
+that a later `rollback` cannot undo. Run `commit` or `rollback` first. The statement needs both the
+`delete` and the `drop` privilege on the table.
 
 Mutation statements include:
 
@@ -552,6 +671,7 @@ null not string int64 float64 object_id oid bool boolean is on in or and between
 show use tables view views materialized refresh concurrently cascade owner no data columns group
 join inner offset unique having explain analyze begin start transaction commit rollback as
 distinct cast integer double engine stats statistics for variables cluster setting settings reset
+truncate
 ```
 
 Colored shell commands:
@@ -582,6 +702,7 @@ abs ceil ceiling floor sqrt pow power mod sign random round
 length lower upper trim ltrim rtrim substring replace contains starts_with ends_with concat
 json_valid json_type json_extract json_value json_contains json_array_length
 to_string to_int64 to_float64 to_bool to_id str_id
+octet_length vector_dims l2_distance inner_product cosine_distance
 ```
 
 ## Autocompletion
@@ -590,8 +711,9 @@ Press `Tab` to autocomplete the word under the cursor; press it again to cycle t
 matches, and `Ctrl+Tab` to cycle backwards.
 
 Completion is context-aware. When the word being typed follows a keyword that expects a
-table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`, or
-`describe` — the shell suggests the **table and view names** of the current database. In
+table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`,
+`describe`, or `truncate` — the shell suggests the **table and view names** of the current
+database. In
 any other position it suggests the SQL keywords, functions, and shell commands.
 
 The `for` of `show statistics for` counts as a table position too, decided by the word
@@ -658,6 +780,40 @@ Casting:
 select cast(score as integer) from scores;
 select to_string(score), to_int64(score), to_float64(score), to_bool(active), to_id(id_text) from scores;
 ```
+
+Vectors:
+
+```sql
+select octet_length(embedding), vector_dims(embedding) from docs;
+select id, l2_distance(embedding, 0x0000803F0000004000004040) as distance
+from docs order by distance limit 10;
+select id from docs order by cosine_distance(embedding, 0x0000803F0000004000004040) limit 10;
+select id from docs order by inner_product(embedding, 0x0000803F0000004000004040) desc limit 10;
+```
+
+A vector is a `bytes` value. It holds tightly packed little-endian float32 elements and carries no
+header, so `vector_dims` is the byte count divided by four. The hex literal above is the
+three-element vector `[1.0, 2.0, 3.0]`. `octet_length` also accepts a string, where it counts UTF-8
+bytes rather than characters.
+
+The three distance functions take two vectors of equal size and return a `float64`. `l2_distance`
+and `cosine_distance` put the nearest row first with `asc`, which is the default. `inner_product`
+runs the other way: the largest value is the most similar, so it needs `desc`. An ascending
+`inner_product` returns the least similar rows, and it reports no error.
+
+A `bytes(N)` column declares a maximum length, never an exact one. A `check` over `vector_dims` is
+what pins the dimension:
+
+```sql
+create table docs (
+  id        object_id primary key,
+  embedding bytes(3072) not null,
+  constraint embedding_is_768d check (vector_dims(embedding) = 768)
+);
+```
+
+The shell has no bind parameters, so a query vector must be typed as a hex literal. A 768-element
+vector is about 6 KB of text. For that size, use a client that binds the vector as a parameter.
 
 ## Script Files
 

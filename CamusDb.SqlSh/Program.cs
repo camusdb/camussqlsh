@@ -6,6 +6,8 @@
  * file that was distributed with this source code.
  */
 
+using CamusDb.SqlSh.Tui;
+using static SqlKind;
 using CamusDB.Client;
 using CommandLine;
 using RadLine;
@@ -44,6 +46,7 @@ if (args.Length > 0 && (args[0] == "--help" || args[0] == "-h"))
 }
 
 // Consumed here so CommandLineParser doesn't reject them as unknown options.
+bool tuiMode = ConsumeFlag(ref args, "--tui");
 bool debugKeys = ConsumeFlag(ref args, "--debug-keys");
 bool diagnoseTerminal = ConsumeFlag(ref args, "--diagnose-terminal");
 bool forceRich = ConsumeFlag(ref args, "--force-rich")
@@ -179,6 +182,10 @@ LineEditor? editor = null;
 CamusTransaction? transaction = null;
 SqlCompletion? sqlCompletion = null;
 
+// The TUI colors its editor pane with the same word list as the line editor, so the
+// highlighter built below is kept where both can reach it.
+WordHighlighter? sharedHighlighter = null;
+
 // Non-interactive mode: run the supplied SQL, then exit. A failure here has no prompt to return
 // to, so report it the way the interactive loop does — a diagnosable line, not a stack trace —
 // and exit non-zero so a caller can tell the statement didn't run.
@@ -275,6 +282,9 @@ if (richEditorSupported)
         "rename",
         "column",
         "drop",
+        // TRUNCATE [TABLE] <table>: empties a base table by moving its contents generation. The
+        // TABLE noise word is optional, so the verb is what the editor colors.
+        "truncate",
         "force",
         "relink",
         "orphan",
@@ -475,6 +485,14 @@ if (richEditorSupported)
         "to_datetime",
         "to_id",
         "str_id",
+        // Vector measurement and distance functions. A vector is a bytes value that holds packed
+        // little-endian float32 elements, so these read a bytes column, not a dedicated type.
+        // octet_length also accepts a string, where it counts UTF-8 bytes, not characters.
+        "octet_length",
+        "vector_dims",
+        "l2_distance",
+        "inner_product",
+        "cosine_distance",
     ];
 
     string[] commands = [
@@ -507,6 +525,7 @@ if (richEditorSupported)
     ];
 
     WordHighlighter worldHighlighter = new();
+    sharedHighlighter = worldHighlighter;
 
     Style funcStyle = new(foreground: Color.Lime);
     Style keywordStyle = new(foreground: Color.Blue);
@@ -595,6 +614,27 @@ if (sqlCompletion is not null)
     {
         // Ignored: the shell is already connected, and this cache is a convenience.
     }
+}
+
+// Full-screen mode takes over the terminal, so it runs instead of the REPL, never beside it.
+if (tuiMode)
+{
+    if (!richEditorSupported)
+    {
+        AnsiConsole.MarkupLine("[red]--tui needs an ANSI terminal.[/] Try [cyan]--force-rich[/] or set [cyan]TERM=xterm-256color[/].");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    await CamusTui.RunAsync(
+        connection,
+        activeConnectionString,
+        FormatValue,
+        sharedHighlighter!,
+        sqlCompletion,
+        Path.Combine(Path.GetTempPath(), "camusdb.query.sql"));
+
+    return;
 }
 
 StringBuilder pendingSql = new();
@@ -860,19 +900,6 @@ async Task SwitchDatabase(string database)
     AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(database));
 }
 
-// Recognizes `use <database>`, with the name bare, `backticked`, or "quoted". A backtick-quoted
-// name is how a database whose name is a keyword or carries spaces is written, and doubled
-// backticks inside it are a literal one.
-static bool IsUseDatabase(string sql, out string database)
-{
-    Match match = Regex.Match(
-        sql.Trim(),
-        """^use\s+(?:`(?<name>(?:``|[^`])+)`|"(?<name>[^"]+)"|(?<name>[^\s;`"]+))\s*;?$""",
-        RegexOptions.IgnoreCase);
-
-    database = match.Success ? match.Groups["name"].Value.Replace("``", "`") : string.Empty;
-    return match.Success && database.Length > 0;
-}
 
 async Task ExecuteSql(string input)
 {
@@ -947,44 +974,6 @@ async Task ExecuteStatement(string sql, bool vertical)
         await ExecuteNonQuery(connection, sql);
 }
 
-static IEnumerable<(string Sql, bool Vertical)> EscapeStringIntoLines(string input)
-{
-    SqlScanner scanner = new();
-
-    foreach (SqlStatement statement in scanner.Feed(input))
-        yield return (statement.Sql, statement.Vertical);
-
-    foreach (SqlStatement statement in scanner.Flush())
-        yield return (statement.Sql, statement.Vertical);
-}
-
-static char FoldSmartQuote(char c) => c switch
-{
-    // Single curly quotes and low-9 variants -> '
-    '‘' or '’' or '‚' or '‛' => '\'',
-    // Double curly quotes and low-9 variants -> "
-    '“' or '”' or '„' or '‟' => '"',
-    _ => c,
-};
-
-static string NormalizeSmartQuotes(string input)
-{
-    StringBuilder? sb = null;
-    for (int i = 0; i < input.Length; i++)
-    {
-        char folded = FoldSmartQuote(input[i]);
-        if (folded == input[i])
-        {
-            sb?.Append(input[i]);
-            continue;
-        }
-
-        sb ??= new StringBuilder(input, 0, i, input.Length);
-        sb.Append(folded);
-    }
-
-    return sb?.ToString() ?? input;
-}
 
 // True while what's been typed so far can't stand on its own, so the prompt should keep reading.
 // Shares the splitter's scanner: whether a ';' terminates a statement and whether a statement is
@@ -1268,23 +1257,6 @@ async Task ExecuteBackup(string arguments)
     }
 }
 
-// True for the shell's `backup …` family, with everything after the verb handed back as arguments.
-static bool IsBackupCommand(string sql, out string arguments)
-{
-    arguments = "";
-
-    string trimmedSql = sql.Trim().TrimEnd(';').Trim();
-
-    if (!trimmedSql.StartsWith("backup", StringComparison.InvariantCultureIgnoreCase))
-        return false;
-
-    // Only the bare verb or the verb followed by a separator — never a table named `backups`.
-    if (trimmedSql.Length > 6 && !char.IsWhiteSpace(trimmedSql[6]))
-        return false;
-
-    arguments = trimmedSql.Length > 6 ? trimmedSql[6..].Trim() : "";
-    return true;
-}
 
 // Backup ids are GUIDs, but they're routinely copied out of a quoted context; accept those spellings
 // rather than sending the quotes on to the server as part of the id.
@@ -1606,40 +1578,6 @@ static async Task ExecuteDDL(CamusConnection connection, string sql)
         AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", stopwatch.Elapsed);
 }
 
-static bool IsBeginTx(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("begin", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("start", StringComparison.InvariantCultureIgnoreCase);
-}
-
-static bool IsCommitTx(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("commit", StringComparison.InvariantCultureIgnoreCase);
-}
-
-static bool IsRollbackTx(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("rollback", StringComparison.InvariantCultureIgnoreCase);
-}
-
-
-static bool IsQueryable(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("select ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("explain ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("analyze ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("desc ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
-}
 
 // Recognizes the shell's own `show prepared` / `\prepared` command, optionally followed by the
 // statement to ask about instead of the last one executed.
@@ -1707,156 +1645,6 @@ static void ShowPrepared(string connectionString, string? sql, bool explicitSql)
     AnsiConsole.WriteLine();
 }
 
-// Collapses a statement onto one line for display, clipping anything past `max` characters.
-static string Abbreviate(string sql, int max = 90)
-{
-    string oneLine = Regex.Replace(sql.Trim(), @"\s+", " ");
-
-    return oneLine.Length <= max ? oneLine : oneLine[..(max - 1)] + "…";
-}
-
-static bool HasDatabase(string connectionString)
-{
-    return connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-        .Where(p => p.Length == 2 && string.Equals(p[0], "Database", StringComparison.OrdinalIgnoreCase))
-        .Any(p => !string.IsNullOrWhiteSpace(p[1]));
-}
-
-static bool IsSystemLevelQuery(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("show databases", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show orphan databases", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show branches from ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show ancestors from ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show engine stats", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("show variables", StringComparison.InvariantCultureIgnoreCase) ||
-           // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
-           // it runs on the endpoint connection and answers in a session that never ran `use`.
-           StartsWithWords(trimmedSql, "show", "cluster", "settings");
-}
-
-// User and grant administration is server-level: like database DDL, these statements name their
-// target inside the SQL, touch only the shared auth catalog, and return no database descriptor —
-// so they run on a database-less connection and need no current database.
-static bool IsUserAdmin(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("create user ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("alter user ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop user ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("grant ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("revoke ", StringComparison.InvariantCultureIgnoreCase);
-}
-
-// Everything the server dispatches before opening a database — database lifecycle DDL, user and
-// grant administration, plus runtime cluster settings.
-static bool IsServerLevelDDL(string sql)
-{
-    return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql);
-}
-
-// Runtime cluster settings are server-level for the same reasons user administration is: the key is
-// named inside the SQL, the change lands in the shared settings keyspace (replicated through the
-// settings log in cluster mode), and the statement returns no database descriptor — so it runs on a
-// database-less connection and needs no current database.
-//
-// CLUSTER and SETTING are plain identifiers to the parser rather than keywords, so the whole
-// three-word prefix is matched here instead of a single verb: SET alone is also how SET TRANSACTION
-// starts, and that one is database-scoped.
-static bool IsClusterSettingsAdmin(string sql)
-{
-    return StartsWithWords(sql, "set", "cluster", "setting") ||
-           StartsWithWords(sql, "reset", "cluster", "setting");
-}
-
-// True when `sql` opens with exactly these words in order, separated by any run of whitespace. The
-// prefixes it matches are three words long and typed by hand at a prompt, where the single-space
-// StartsWith spelling used for the older statements would quietly miss `SET  CLUSTER SETTING` and
-// send it down the needs-a-database path. Each word must end at a boundary, so `SET` does not match
-// the head of `SETTINGS`, and the last word may end the statement (`SHOW CLUSTER SETTINGS`) or be
-// followed by more of it (the key after `SETTING`).
-static bool StartsWithWords(string sql, params string[] words)
-{
-    string trimmedSql = sql.TrimStart();
-    int position = 0;
-
-    foreach (string word in words)
-    {
-        if (string.Compare(trimmedSql, position, word, 0, word.Length, StringComparison.InvariantCultureIgnoreCase) != 0)
-            return false;
-
-        position += word.Length;
-
-        if (position < trimmedSql.Length && !char.IsWhiteSpace(trimmedSql[position]) && trimmedSql[position] != ';')
-            return false;
-
-        while (position < trimmedSql.Length && char.IsWhiteSpace(trimmedSql[position]))
-            position++;
-    }
-
-    return true;
-}
-
-// Statements the server dispatches before opening a database (StatementScope.IsDatabaseScopedMutation):
-// they name their target inside the SQL, so they must run on a database-less connection rather than
-// being rejected for having no current database. A rename has two accepted spellings —
-// RENAME DATABASE a TO b and ALTER DATABASE a RENAME TO b — and only COMMENT ON DATABASE is
-// database-scoped; COMMENT ON TABLE/COLUMN still needs a current database.
-static bool IsDatabaseDDL(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("create database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("rename database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("alter database ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("comment on database ", StringComparison.InvariantCultureIgnoreCase);
-}
-
-static bool ChangesTableSet(string sql)
-{
-    string trimmedSql = sql.TrimStart();
-
-    return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
-           IsViewDDL(trimmedSql);
-}
-
-// View and materialized-view DDL. CREATE OR REPLACE and ALTER … RENAME change what a name
-// resolves to, so all of these also trigger a completion-cache refresh via ChangesTableSet.
-static bool IsViewDDL(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return trimmedSql.StartsWith("create view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("create or replace view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("create materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("create or replace materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("alter view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("alter materialized view ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("refresh materialized view ", StringComparison.InvariantCultureIgnoreCase);
-}
-
-static bool IsDDL(string sql)
-{
-    string trimmedSql = sql.Trim();
-
-    return IsServerLevelDDL(trimmedSql) ||
-           IsViewDDL(trimmedSql) ||
-           trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
-           trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
-}
 
 // Default listener ports for a local server: REST on 5095, gRPC on 5096 (both enabled by default).
 const int DefaultRestPort = 5095;
@@ -1948,20 +1736,6 @@ static void WriteConnectionError(Exception ex)
     }
 }
 
-// Appends an empty Database= key when the connection string doesn't already carry one.
-static string EnsureDatabase(string connectionString)
-{
-    return HasKey(connectionString, "Database")
-        ? connectionString
-        : connectionString.TrimEnd(';') + ";Database=";
-}
-
-// Returns the connection string with the given transport pinned via Protocol=, replacing any
-// existing Protocol= key.
-static string WithProtocol(string connectionString, string protocol)
-{
-    return WithKey(connectionString, "Protocol", protocol);
-}
 
 // Points `backup …` at an HTTP endpoint on a gRPC connection: the backup admin API is REST-only, so
 // without this every backup command on the shell's default (gRPC) connection would fail asking for the
@@ -1979,35 +1753,6 @@ static string WithBackupEndpoint(string connectionString, string? endpoint)
     return WithKey(connectionString, "BackupEndpoint", first);
 }
 
-// Returns the connection string with key=value set, replacing any existing occurrence of the key.
-static string WithKey(string connectionString, string key, string value)
-{
-    List<string> parts = connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Where(p => !p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-        .ToList();
-
-    parts.Add($"{key}={value}");
-    return string.Join(';', parts);
-}
-
-static bool HasKey(string connectionString, string key)
-{
-    return connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Any(p => p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase));
-}
-
-// Returns the value of a connection-string key, or null when the key is absent.
-static string? GetConnValue(string connectionString, string key)
-{
-    return connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-        .Where(p => p.Length == 2 && string.Equals(p[0], key, StringComparison.OrdinalIgnoreCase))
-        .Select(p => p[1])
-        .FirstOrDefault();
-}
 
 // Human-readable transport name for the resolved connection string (Protocol= defaults to REST).
 static string DescribeTransport(string connectionString)
@@ -2022,24 +1767,6 @@ static string DescribeTransport(string connectionString)
     return string.Equals(protocol, "grpc", StringComparison.OrdinalIgnoreCase) ? "gRPC" : "REST";
 }
 
-// Produces a connection string for the same endpoint/transport but with no database selected,
-// used to reach system-level commands. Protocol= and Endpoint= are preserved so the transport
-// and port stay consistent with the live connection.
-static string GetEndpointConnectionString(string connectionString)
-{
-    return SwapDatabase(connectionString, "");
-}
-
-static string SwapDatabase(string connectionString, string newDatabase)
-{
-    List<string> parts = connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Where(p => !p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase))
-        .ToList();
-
-    parts.Add($"Database={newDatabase}");
-    return string.Join(';', parts);
-}
 
 static async Task<List<string>> GetHistory(string historyPath)
 {
@@ -2096,6 +1823,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                authentication enabled)");
     AnsiConsole.MarkupLine("  -p, --password                That user's password; prompted for when -u is given without it");
     AnsiConsole.MarkupLine("  --token                       Use a bearer token obtained elsewhere instead of logging in");
+    AnsiConsole.MarkupLine("  --tui                         Open the full-screen browser: catalog, editor and results");
+    AnsiConsole.MarkupLine("                                in three panes. TAB moves between panes, F5 runs the query");
     AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");
     AnsiConsole.MarkupLine("                                on terminals whose TERM value Spectre.Console doesn't recognize");
     AnsiConsole.MarkupLine("  --diagnose-terminal           Print terminal capabilities and exit (why rich mode is on/off)");

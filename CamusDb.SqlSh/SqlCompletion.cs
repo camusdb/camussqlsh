@@ -12,7 +12,7 @@ using RadLine;
 /// <summary>
 /// Provides Tab-completion for the SQL shell. Completion is context-aware: when the
 /// word being typed follows a keyword that expects a table or view name (from, into,
-/// update, join, table, view, describe, or the FOR of SHOW STATISTICS FOR), the cached
+/// update, join, table, view, describe, truncate, or the FOR of SHOW STATISTICS FOR), the cached
 /// list of table, view and materialized-view names is offered instead of the static SQL
 /// vocabulary. Names are
 /// loaded lazily via "show tables" / "show views" / "show materialized views" and
@@ -33,6 +33,9 @@ internal sealed class SqlCompletion : ITextCompletion
         "view",
         "desc",
         "describe",
+        // TRUNCATE [TABLE] <table>. The optional TABLE noise word lands on the entry above, so this
+        // one covers the short spelling, where the verb itself precedes the table name.
+        "truncate",
     };
 
     // The word after SETTING is a configuration key: SET CLUSTER SETTING <key> = <value> and
