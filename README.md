@@ -2,6 +2,8 @@
 
 `camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive mode for running SQL (`-e`/`--execute`) or a whole `.sql` file (`-f`/`--file`) and exiting. A full-screen mode (`--tui`) puts the catalog, the editor and the results on one screen.
 
+<img width="809" height="503" alt="cli" src="https://github.com/user-attachments/assets/f50a6b6b-af7f-4212-9246-1bf5cf696f97" />
+
 ## Installation
 
 Install the published NuGet tool:
@@ -373,6 +375,8 @@ Semicolons inside single or double quoted strings do not split statements.
 3. **Query Results**, at the bottom right. It shows the rows of the last query. It also keeps one log line for each statement that ran.
 
 A status bar below the panes reports the elapsed time, the row count and any error. A key bar sits at the foot of the screen.
+
+<img width="808" height="507" alt="tui" src="https://github.com/user-attachments/assets/fe53b8df-8f8c-4b20-ba16-47d41e3d0851" />
 
 Start the mode with the `--tui` flag:
 
