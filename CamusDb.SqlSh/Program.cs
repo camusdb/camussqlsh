@@ -390,6 +390,13 @@ if (richEditorSupported)
         // matches STATISTICS as a plain identifier so it stays usable as a name, but the editor
         // colors it like the rest of the SHOW vocabulary.
         "statistics",
+        // SHOW RANGES FROM TABLE|INDEX and SHOW RANGE … FOR ROW (…): where a relation's key space is
+        // divided, and which span holds one row. Like STATISTICS, all three words are plain
+        // identifiers to the parser and stay usable as table and column names; the editor colors
+        // them because they read as part of the SHOW vocabulary.
+        "ranges",
+        "range",
+        "row",
         // SET/RESET CLUSTER SETTING and SHOW CLUSTER SETTINGS. Both spellings of the last word are
         // listed because the statements differ: SETTING for the mutations, SETTINGS for the listing.
         "cluster",
@@ -773,6 +780,8 @@ while (true)
 
         if (sqlCompletion is not null && ChangesTableSet(executableSql) && HasDatabase(activeConnectionString))
             await sqlCompletion.RefreshTablesAsync(connection);
+        else if (sqlCompletion is not null && ChangesIndexSet(executableSql))
+            sqlCompletion.InvalidateIndexes();
     }
     catch (Exception ex)
     {
@@ -1878,6 +1887,14 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                What the optimizer believes about a table: row counts,");
     AnsiConsole.MarkupLine("                                column min/max, histogram buckets, distinct-value counts,");
     AnsiConsole.MarkupLine("                                and how stale they are ([cyan]analyze <table>[/] refreshes them)");
+    AnsiConsole.MarkupLine("  [cyan]show ranges from table[/] <name>");
+    AnsiConsole.MarkupLine("  [cyan]show ranges from index[/] <table>@<index>");
+    AnsiConsole.MarkupLine("                                How a relation's key space is divided into spans, and");
+    AnsiConsole.MarkupLine("                                where each span's leader is, as [white]this node[/] sees it");
+    AnsiConsole.MarkupLine("  [cyan]show range from table[/] <name> [cyan]for row[/] (<primary key>)");
+    AnsiConsole.MarkupLine("  [cyan]show range from index[/] <table>@<index> [cyan]for row[/] (<values>)");
+    AnsiConsole.MarkupLine("                                The one span that holds a row. Fifteen columns, so");
+    AnsiConsole.MarkupLine("                                append [cyan]\\G[/] for vertical output");
     AnsiConsole.MarkupLine("  [cyan]show engine stats[/]             Runtime engine metrics for the node answering");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");

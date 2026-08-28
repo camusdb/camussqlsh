@@ -830,6 +830,8 @@ internal sealed class CamusTui
             // A CREATE or DROP changes what the catalog should show.
             if (ChangesTableSet(sql))
                 await RefreshCatalogAsync();
+            else if (ChangesIndexSet(sql))
+                _completion?.InvalidateIndexes();
         }
         else if (IsBeginTx(sql))
         {

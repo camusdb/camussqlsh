@@ -6,6 +6,7 @@
  * file that was distributed with this source code.
  */
 
+using System.Collections.Concurrent;
 using CamusDB.Client;
 using RadLine;
 
@@ -17,7 +18,8 @@ using RadLine;
 /// vocabulary. Names are
 /// loaded lazily via "show tables" / "show views" / "show materialized views" and
 /// refreshed whenever the active database changes. Configuration keys are cached the
-/// same way, from "show variables", for the cluster-settings statements.
+/// same way, from "show variables", for the cluster-settings statements, and index names
+/// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES.
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
@@ -46,9 +48,24 @@ internal sealed class SqlCompletion : ITextCompletion
         "setting",
     };
 
+    // SHOW RANGES FROM INDEX <table>@<index>, and its singular SHOW RANGE form. The index half is
+    // listed per table rather than for the whole database, because that is the shape SHOW INDEXES
+    // answers in: one statement per table. Each entry is loaded on first use and kept.
+    private readonly ConcurrentDictionary<string, Task<string[]>> _indexes = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly string[] _staticWords;
     private volatile string[] _tables = [];
     private volatile string[] _settings = [];
+
+    // The connection the table cache was loaded over, kept so an index list can be fetched later,
+    // when the user asks for one. Null until the first refresh, which is also the point before
+    // which no database is selected and SHOW RANGES cannot run at all.
+    private volatile CamusConnection? _connection;
+
+    // How long a Tab press waits for an index list that is not cached yet. The load continues in
+    // the background past this point, so a press that gives up still fills the cache for the next
+    // one; the cap is what keeps a slow or unreachable server from freezing the editor.
+    private static readonly TimeSpan IndexLoadTimeout = TimeSpan.FromMilliseconds(750);
 
     public SqlCompletion(IEnumerable<string> staticWords)
     {
@@ -61,6 +78,9 @@ internal sealed class SqlCompletion : ITextCompletion
     {
         if (IsSettingContext(prefix) && _settings.Length > 0)
             return _settings;
+
+        if (IsIndexContext(prefix))
+            return IndexCompletions(word);
 
         if (IsTableContext(prefix) && _tables.Length > 0)
             return _tables;
@@ -83,6 +103,101 @@ internal sealed class SqlCompletion : ITextCompletion
         // of SHOW STATISTICS FOR TABLE <table> already lands in the branch above.
         return string.Equals(lastToken, "for", StringComparison.OrdinalIgnoreCase) &&
                string.Equals(TokenFromEnd(prefix, 1), "statistics", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The INDEX of SHOW RANGES FROM INDEX <table>@<index>. INDEX alone is not enough — CREATE INDEX
+    // and DROP INDEX name something that does not exist yet, or that is not qualified by a table —
+    // so the FROM before it is what decides. No other statement spells FROM INDEX.
+    private static bool IsIndexContext(string prefix)
+    {
+        return string.Equals(LastToken(prefix), "index", StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(TokenFromEnd(prefix, 1), "from", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The FROM INDEX target is one word to the line editor, because '@' is not a word boundary
+    // there. So the completion has to be the whole `table@index` pair: completing the table half
+    // alone would leave the user to type the index half with no help at all.
+    private IEnumerable<string>? IndexCompletions(string word)
+    {
+        int at = word.IndexOf('@');
+
+        // No '@' typed yet: the table half is what is being written, and the index half cannot be
+        // listed before the table that holds it is known.
+        if (at < 0)
+            return _tables.Length > 0 ? _tables : null;
+
+        string table = word[..at];
+
+        // The table half goes into a statement, so accept only a plain identifier. A half-typed or
+        // quoted name is not sent to the server; the target itself rejects quoted identifiers too.
+        if (!IsPlainIdentifier(table))
+            return null;
+
+        CamusConnection? connection = _connection;
+
+        // No refresh has run yet, so no database is selected — and SHOW RANGES needs one.
+        if (connection is null)
+            return null;
+
+        // Task.Run, because this is the editor's own key-handling thread and the first steps of an
+        // async call run on the caller's thread.
+        Task<string[]> load = _indexes.GetOrAdd(table, name => Task.Run(() => LoadIndexesAsync(connection, name)));
+
+        // A cached list is already complete here, so this returns at once. A first Tab on a table
+        // that has none waits a short time for the load. Wait rethrows a faulted one, and a key
+        // handler is the last place an exception may surface, so the throw is taken here.
+        try
+        {
+            load.Wait(IndexLoadTimeout);
+        }
+        catch (Exception)
+        {
+            // Ignored: the state of the load decides what happens next, not the throw.
+        }
+
+        // Still running: complete nothing this time rather than hold the editor open. The load
+        // continues, and the next Tab answers from the cache it fills.
+        if (!load.IsCompleted)
+            return null;
+
+        // A load that failed, or that named no index, is dropped rather than kept — a table that
+        // did not exist when it ran may exist by the next Tab, and that press retries it.
+        if (!load.IsCompletedSuccessfully || load.Result.Length == 0)
+        {
+            _indexes.TryRemove(table, out _);
+            return null;
+        }
+
+        return load.Result;
+    }
+
+    private async Task<string[]> LoadIndexesAsync(CamusConnection connection, string table)
+    {
+        List<string> names = new();
+
+        // SHOW INDEXES FROM <table> names the index in its Key_name column, beside the table, the
+        // key columns, the covering payload and the uniqueness flag. Asking for the column by name
+        // matters more here than elsewhere: the first column is the table name, so falling back to
+        // it would offer `users@users` for every index the table has.
+        bool loaded = await LoadNamesAsync(connection, $"show indexes from {table}", names, "Key_name", fallbackToFirstColumn: false);
+
+        // An empty answer is what the caller reads as a failure, so a table that could not be read
+        // — no such table, a dropped connection — is retried rather than remembered as indexless.
+        if (!loaded)
+            return [];
+
+        // The name is qualified back onto the table the user typed, so what lands in the buffer is
+        // the whole target. The primary index keeps its internal `~pk` spelling, which is what
+        // SHOW INDEXES prints and what the parser accepts.
+        return names.Select(name => $"{table}@{name}")
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+    }
+
+    private static bool IsPlainIdentifier(string name)
+    {
+        return name.Length > 0 && name.All(c => char.IsLetterOrDigit(c) || c == '_');
     }
 
     private static bool IsSettingContext(string prefix)
@@ -121,6 +236,16 @@ internal sealed class SqlCompletion : ITextCompletion
     private static bool IsWordBoundary(char c) => char.IsWhiteSpace(c) || c is ',' or '(' or ';';
 
     /// <summary>
+    /// Drops the cached index names. Called after a statement that changes the indexes of a table
+    /// without changing the set of relations, which is the one case a table refresh does not cover.
+    /// The lists are fetched again, one table at a time, the next time one is asked for.
+    /// </summary>
+    public void InvalidateIndexes()
+    {
+        _indexes.Clear();
+    }
+
+    /// <summary>
     /// Loads the table and view names for the active database into the completion cache.
     /// Each command fails independently (no database selected, connection issues, a server
     /// that predates views), so completion degrades gracefully to whatever could be loaded,
@@ -128,6 +253,11 @@ internal sealed class SqlCompletion : ITextCompletion
     /// </summary>
     public async Task RefreshTablesAsync(CamusConnection connection)
     {
+        // The index lists are per database and per table, so they cannot outlive a `use` switch or
+        // a statement that changes the set of relations. Both are exactly when this runs.
+        _connection = connection;
+        _indexes.Clear();
+
         List<string> names = new();
 
         bool loadedAny = await LoadNamesAsync(connection, "show tables", names);
@@ -180,7 +310,25 @@ internal sealed class SqlCompletion : ITextCompletion
     // server without the classification columns keeps every key rather than losing them all.
     private static string? Cell(Dictionary<string, ColumnValue> row, string column)
     {
-        return row.TryGetValue(column, out ColumnValue value) ? value.StrValue : null;
+        return TryGetCell(row, column, out ColumnValue value) ? value.StrValue : null;
+    }
+
+    // A row's cell, matched without case. The reader builds the row with the server's own column
+    // spelling, which differs between statements — `variable` against `Key_name` — so a call site
+    // must not have to reproduce the case to read a column that is there.
+    private static bool TryGetCell(Dictionary<string, ColumnValue> row, string column, out ColumnValue value)
+    {
+        foreach (KeyValuePair<string, ColumnValue> cell in row)
+        {
+            if (string.Equals(cell.Key, column, StringComparison.OrdinalIgnoreCase))
+            {
+                value = cell.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static async Task<bool> LoadNamesAsync(
@@ -188,7 +336,8 @@ internal sealed class SqlCompletion : ITextCompletion
         string sql,
         List<string> names,
         string? column = null,
-        Func<Dictionary<string, ColumnValue>, bool>? include = null)
+        Func<Dictionary<string, ColumnValue>, bool>? include = null,
+        bool fallbackToFirstColumn = true)
     {
         try
         {
@@ -204,9 +353,9 @@ internal sealed class SqlCompletion : ITextCompletion
                 if (include is not null && !include(row))
                     continue;
 
-                string? name = column is not null && row.TryGetValue(column, out ColumnValue named)
+                string? name = column is not null && TryGetCell(row, column, out ColumnValue named)
                     ? named.StrValue
-                    : row.Values.Count > 0 ? row.Values.First().StrValue : null;
+                    : fallbackToFirstColumn && row.Values.Count > 0 ? row.Values.First().StrValue : null;
 
                 if (!string.IsNullOrWhiteSpace(name))
                     names.Add(name);

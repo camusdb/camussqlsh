@@ -500,6 +500,7 @@ show tables;
 desc users;
 describe users;
 show statistics for users;
+show ranges from table users;
 ```
 
 ### Table statistics
@@ -515,6 +516,48 @@ show statistics for users\G             -- ten columns; vertical output is easie
 One row per statistics target, discriminated by the `kind` column (`table`, `column`, `key`, `index`). A `null` means either "does not apply to this row" or "never collected" — `kind` tells you which. `last_analyzed` and `stale_mutations` describe the whole table and repeat on every row.
 
 The values are the answering node's view and include mutations it has not flushed yet, so in a cluster two nodes may report different values for the same table. Materialized views have statistics of their own; a plain view does not.
+
+### Ranges
+
+CamusDB divides a table's row space, and each order-safe index space, across Raft partitions, and
+splits them further as they grow. `show ranges` prints that layout. One row per span, in the order
+the router searches them.
+
+```sql
+show ranges from table users;
+show ranges from index users@by_email;
+show ranges from table users\G            -- fifteen columns; vertical output is easier to read
+```
+
+`show range … for row (…)` prints the single span that holds one row:
+
+```sql
+show range from table users for row (1500);            -- by primary key
+show range from index users@by_email for row ('a@example.com');
+```
+
+The two `for row` forms differ. On an **index** the key is computed from the values alone, so it
+answers for a key that does not exist, and fewer values than the index has key columns are accepted
+— a prefix still lands in one span. On a **table** the row key is ordered by the row id the engine
+minted, not by the primary key, so the server point-reads the primary index to find the row. A
+primary key no row carries is an error there, not an empty result. That probe takes no lock and
+joins no read set, so the statement is safe inside a transaction.
+
+Three columns are worth reading carefully. `routing` is `key_range` or `hash` **as this node routes
+the space**; a hash-routed space has exactly one span with both bounds null. `leader` is a gossip
+hint, and a null means unknown rather than "no leader". `replicas` empty means legacy full
+replication, not "no replicas". Every column describes the node that answered, so two nodes may
+legitimately disagree, and there is no cluster-wide form.
+
+Read `partition_id`, not `span`, to talk about the same range across two runs: a split renumbers
+every span after it, while the partition keeps its identity. `start_key` and `end_key` are decoded
+in column terms, and `raw_start_key`/`raw_end_key` carry the encoded bounds; a bound that will not
+decode falls back to its raw text rather than failing the statement.
+
+Three spellings reach the primary index: `t@~pk`, `t@t_pkey` and `t@primary`. The target takes no
+quoted identifiers — `` `my_table`@`my_index` `` does not parse. A plain view has no key space of
+its own; ask for the ranges of the tables its body reads. The statement needs `select` on the
+target, and it reports only: it never moves a range.
 
 DDL statements include:
 
@@ -671,7 +714,7 @@ null not string int64 float64 object_id oid bool boolean is on in or and between
 show use tables view views materialized refresh concurrently cascade owner no data columns group
 join inner offset unique having explain analyze begin start transaction commit rollback as
 distinct cast integer double engine stats statistics for variables cluster setting settings reset
-truncate
+truncate ranges range row
 ```
 
 Colored shell commands:
@@ -719,17 +762,28 @@ any other position it suggests the SQL keywords, functions, and shell commands.
 The `for` of `show statistics for` counts as a table position too, decided by the word
 before it: `show grants for` takes a user name, so `for` alone is not enough.
 
+The `index` of `show ranges from index` takes a **qualified** `table@index` name, which the
+editor treats as one word. Before the `@` the shell suggests table names; after it, the index
+names of that table, loaded from `show indexes from <table>` on the first `Tab` that asks for
+them. A press that arrives before the load answers completes nothing; the next one completes
+from the cache.
+
 ```sql
 select * from us⇥              -- completes to a table such as "users"
 insert into ⇥                  -- cycles through all table names
 show statistics for ⇥          -- cycles through all table names
+show ranges from table ⇥       -- cycles through all table names
+show ranges from index us⇥     -- completes the table half, such as "users"
+show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
 sel⇥                           -- completes to "select"
 ```
 
 Relation names are loaded from `show tables`, `show views` and `show materialized views`,
 and refreshed automatically on startup, after a `use <database>` switch, and after a
 statement that changes the set of relations (`create`/`drop table`, `create [or
-replace]`/`drop`/`alter view`, and their materialized forms).
+replace]`/`drop`/`alter view`, and their materialized forms). Each of those refreshes also
+drops the cached index names, because an index belongs to one table in one database. Index DDL
+(`create [unique] index`, `drop index`, `alter table`) drops them on its own.
 
 ## Function Examples
 

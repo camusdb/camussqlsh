@@ -235,6 +235,23 @@ internal static class SqlKind
                trimmedSql.StartsWith("comment on database ", StringComparison.InvariantCultureIgnoreCase);
     }
 
+    // Index DDL: what it changes is the set of index names on one table, not the set of relations.
+    // The completion cache tells the two apart, because an index list is fetched per table and a
+    // CREATE INDEX must not cost a reload of every relation name in the database.
+    internal static bool ChangesIndexSet(string sql)
+    {
+        string trimmedSql = sql.TrimStart();
+
+        return trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
+               // CREATE UNIQUE INDEX is the same statement with a constraint on the key, and it is
+               // spelled out because UNIQUE sits between the verb and the noun.
+               trimmedSql.StartsWith("create unique index ", StringComparison.InvariantCultureIgnoreCase) ||
+               trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
+               // ALTER TABLE also adds, drops and renames keys, and a rename moves a name the
+               // completion cache holds. The whole verb is taken rather than each of its forms.
+               trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
+    }
+
     internal static bool ChangesTableSet(string sql)
     {
         string trimmedSql = sql.TrimStart();
