@@ -151,6 +151,12 @@ internal static class SqlKind
                trimmedSql.StartsWith("show grants", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("show engine stats", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("show variables", StringComparison.InvariantCultureIgnoreCase) ||
+               // The node's slow-query ring. Like SHOW ENGINE STATS it reports the node that answered
+               // and reads from no database, so it runs on the endpoint connection. SLOW and QUERIES
+               // are plain identifiers to the parser rather than keywords, so the whole three-word
+               // prefix is matched by words: the single-space StartsWith spelling would miss
+               // `SHOW  SLOW QUERIES` and send it down the needs-a-database path.
+               StartsWithWords(trimmedSql, "show", "slow", "queries") ||
                // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
                // it runs on the endpoint connection and answers in a session that never ran `use`.
                StartsWithWords(trimmedSql, "show", "cluster", "settings");

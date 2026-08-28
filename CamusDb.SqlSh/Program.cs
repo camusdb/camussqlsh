@@ -397,6 +397,11 @@ if (richEditorSupported)
         "ranges",
         "range",
         "row",
+        // SHOW SLOW QUERIES [LIKE '<pattern>']: the node's record of statements that ran over the
+        // configured threshold. Both words are plain identifiers to the parser and stay usable as
+        // names; the editor colors them because they read as part of the SHOW vocabulary.
+        "slow",
+        "queries",
         // SET/RESET CLUSTER SETTING and SHOW CLUSTER SETTINGS. Both spellings of the last word are
         // listed because the statements differ: SETTING for the mutations, SETTINGS for the listing.
         "cluster",
@@ -1896,6 +1901,10 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                The one span that holds a row. Fifteen columns, so");
     AnsiConsole.MarkupLine("                                append [cyan]\\G[/] for vertical output");
     AnsiConsole.MarkupLine("  [cyan]show engine stats[/]             Runtime engine metrics for the node answering");
+    AnsiConsole.MarkupLine("  [cyan]show slow queries[/] [[like '<pattern>']]");
+    AnsiConsole.MarkupLine("                                What [white]this node[/] recorded over its slow-query threshold,");
+    AnsiConsole.MarkupLine("                                newest first. Off by default, and lost on restart;");
+    AnsiConsole.MarkupLine("                                fourteen columns, so append [cyan]\\G[/] for vertical output");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");

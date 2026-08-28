@@ -505,6 +505,7 @@ desc users;
 describe users;
 show statistics for users;
 show ranges from table users;
+show slow queries;
 ```
 
 ### Table statistics
@@ -562,6 +563,44 @@ Three spellings reach the primary index: `t@~pk`, `t@t_pkey` and `t@primary`. Th
 quoted identifiers — `` `my_table`@`my_index` `` does not parse. A plain view has no key space of
 its own; ask for the ranges of the tables its body reads. The statement needs `select` on the
 target, and it reports only: it never moves a range.
+
+### Slow query log
+
+The server can record every statement that ran at or over a duration you set, with the execution
+facts that explain the duration. `show slow queries` reads that record back. Rows come back newest
+first, so a bare statement answers "what just happened" without an `order by`.
+
+```sql
+show slow queries;
+show slow queries like '%from orders%';
+show slow queries\G                       -- fourteen columns; vertical output is easier to read
+```
+
+The log is **off by default**. Turn it on per node in the server's `config.yml`
+(`slow_query_log_enabled`, `slow_query_log_threshold_ms`, `slow_query_log_max_entries`,
+`slow_query_log_max_sql_length`), and confirm what a node resolved with `show variables like
+'slow_query%'`. A node that started with the log off has no ring at all, so turning the setting on
+at runtime records nothing — that one needs a restart.
+
+Three columns answer most "why was this slow" questions without a second run. `full_scan` means the
+plan read a whole relation instead of seeking through an index. `spilled` means a sort, grouping,
+distinct or hash join outgrew its memory budget and wrote to disk. `rows_read` far above
+`rows_returned` is the signature of a predicate no index serves.
+
+`outcome` is `completed`, `abandoned` or `failed`. `abandoned` means the caller stopped reading
+early, so `rows_returned` is a floor rather than a total; the work was still done, which is why the
+entry is kept. `failed` carries an `error_code`, and a slow failure is usually the most interesting
+entry in the log.
+
+`seq` keeps counting past the ring's capacity. If the newest `seq` advanced between two readings by
+more than the number of entries the ring holds, entries were overwritten in between and you are not
+seeing everything that qualified.
+
+The statement needs a **superuser**, the same bar as `show engine stats` and `show variables`, and a
+sharper reason: the rows carry the literal SQL other users ran, so a predicate value from a table
+the caller holds no grant on can appear verbatim. Like the other node-level statements it runs
+without a current database, it reports only the node that answered, and its entries do not survive a
+restart.
 
 DDL statements include:
 
@@ -718,7 +757,7 @@ null not string int64 float64 object_id oid bool boolean is on in or and between
 show use tables view views materialized refresh concurrently cascade owner no data columns group
 join inner offset unique having explain analyze begin start transaction commit rollback as
 distinct cast integer double engine stats statistics for variables cluster setting settings reset
-truncate ranges range row
+truncate ranges range row slow queries
 ```
 
 Colored shell commands:
