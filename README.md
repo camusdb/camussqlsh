@@ -58,8 +58,8 @@ CamusDB authentication is **off by default**, and a shell started without creden
 exactly as before. Against a server started with `CAMUSDB_AUTH_ENABLED=true`, pass a user:
 
 ```shell
-$ camus-cli northwind -u app -p app-secret
 $ camus-cli northwind -u app                 # prompts: Password:
+$ CAMUS_PASSWORD=app-secret camus-cli northwind -u app
 ```
 
 The password is exchanged **once** for a short-lived bearer token; every statement then carries
@@ -120,8 +120,9 @@ camus-cli [database] [options]
 | `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
 | `-f`, `--file` | Execute the statements in a `.sql` file and exit, stopping at the first error. Use `-f -` to read the script from standard input. See [Running a .sql File](#running-a-sql-file). |
 | `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
-| `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). |
+| `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). Prefer the prompt or `CAMUS_PASSWORD`: on the command line the password is visible to every other process on the machine, and each use prints a warning. |
 | `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
+| `--no-history` | Do not load or save the statement history. |
 | `--tui` | Open the full-screen mode: catalog, editor and results in three panes. Needs an ANSI terminal. See [Full-Screen Mode](#full-screen-mode---tui). |
 | `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
 | `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
@@ -468,23 +469,15 @@ A cap of 500 rows is on at start. With the cap on, the grid stops at 500 rows an
 
 ### The query file
 
-The editor text is kept between sessions in a file under the system temporary directory:
-
-```text
-camusdb.query.sql
-```
+The editor text is kept between sessions in a file under the user's own profile, next to the history file (see [History](#history)): `<state directory>/query.sql`. The state directory is created with owner-only permissions, so other local users cannot read the query buffer.
 
 The mode loads this file at start, and saves it at exit. Press `Ctrl+S` to save it at any time. Press `Ctrl+L` or `Ctrl+U` to empty the editor.
 
 ## History
 
-Executed statements are stored in a JSON history file under the system temporary directory:
+Executed statements are stored in a JSON history file under the user's own profile — `$XDG_STATE_HOME/camusdb/history.json` when that variable is set, otherwise `~/.config/camusdb/history.json` on Linux and macOS and `%LOCALAPPDATA%\camusdb\history.json` on Windows. The directory is created with owner-only permissions (0700 on Unix) and the file is written only for the owning user, so other local users cannot read it. The file holds at most the 2,000 most recent statements.
 
-```text
-camusdb.history.json
-```
-
-History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once. Statements that inline a password (`CREATE USER … IDENTIFIED BY '…'`, `ALTER USER …`) are kept out of the file — they stay recallable with `Up` for the rest of the session only.
+History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once. Statements that inline a password (`CREATE USER … IDENTIFIED BY '…'`, `ALTER USER …`) are kept out of the file — they stay recallable with `Up` for the rest of the session only. Run the shell with `--no-history` to skip the file entirely.
 
 Use `Up` and `Down` to navigate history. In multiline input, `Up` and `Down` first move between lines; from the first or last line they navigate history.
 

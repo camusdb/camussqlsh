@@ -52,23 +52,118 @@ internal static class SqlKind
         _ => c,
     };
 
+    // Folds curly quotes into statement text, but only outside string literals: a ’ that is
+    // genuinely part of a value must reach the server unchanged, and folding it silently
+    // corrupts the data being written (see SmartQuoteFolder).
     internal static string NormalizeSmartQuotes(string input)
     {
-        StringBuilder? sb = null;
-        for (int i = 0; i < input.Length; i++)
+        return new SmartQuoteFolder().Fold(input);
+    }
+
+    /// <summary>
+    /// Folds Unicode curly quotes to the straight delimiters the parser knows, without touching
+    /// anything inside a string literal. A string opened by a folded curly is also closed by one
+    /// — pasted text like <c>‘bob’</c> carries smart quotes on both sides — while a string opened
+    /// by a straight quote treats a curly as data and preserves it.
+    /// Instances carry quote state across calls so a script folded line by line keeps multi-line
+    /// literals intact; a fresh instance is right for a single self-contained statement. State
+    /// survives an unterminated string by design while a script streams in; call <see cref="Reset"/>
+    /// when a statement is abandoned so a dangling quote can't stick to later statements.
+    /// </summary>
+    internal sealed class SmartQuoteFolder
+    {
+        private char inside;           // the straight delimiter of the string we're in, if any
+        private bool openedByFold;     // that string was entered through a folded curly quote
+
+        internal void Reset() => inside = '\0';
+
+        internal string Fold(string input)
         {
-            char folded = FoldSmartQuote(input[i]);
-            if (folded == input[i])
+            StringBuilder? sb = null;
+
+            for (int i = 0; i < input.Length; i++)
             {
-                sb?.Append(input[i]);
-                continue;
+                char c = input[i];
+
+                if (inside != '\0')
+                {
+                    // A backslash escapes the next character inside a string literal, but a
+                    // backtick-quoted identifier has no escapes (mirrors SqlScanner).
+                    if (c == '\\' && inside != '`' && i + 1 < input.Length)
+                    {
+                        if (sb is not null)
+                        {
+                            sb.Append(c);
+                            sb.Append(input[i + 1]);
+                        }
+
+                        i++;
+                        continue;
+                    }
+
+                    if (c == inside)
+                    {
+                        // A doubled delimiter is a literal one: the string stays open, and so
+                        // does the memory that it was opened by a folded curly.
+                        bool doubled = i + 1 < input.Length && input[i + 1] == inside;
+
+                        if (sb is not null)
+                            sb.Append(c);
+
+                        if (doubled)
+                        {
+                            if (sb is not null)
+                                sb.Append(input[i + 1]);
+
+                            i++;
+                            continue;
+                        }
+
+                        inside = '\0';
+                        openedByFold = false;
+                        continue;
+                    }
+
+                    // A curly sibling closes a string that was opened by folding — pasted ‘…’
+                    // pairs carry smart quotes on both sides — and is folded on the way out.
+                    // In a straight-quoted string a curly is just data and is preserved.
+                    if (openedByFold && FoldSmartQuote(c) == inside)
+                    {
+                        if (sb is not null)
+                            sb.Append(inside);
+
+                        inside = '\0';
+                        openedByFold = false;
+                        continue;
+                    }
+
+                    if (sb is not null)
+                        sb.Append(c);
+
+                    continue;
+                }
+
+                char folded = FoldSmartQuote(c);
+
+                if (folded is '\'' or '"' or '`')
+                {
+                    inside = folded;
+                    openedByFold = folded != c;
+                }
+
+                if (folded != c)
+                {
+                    sb ??= new StringBuilder(input, 0, i, input.Length);
+                    sb.Append(folded);
+                }
+                else
+                {
+                    sb?.Append(c);
+                }
             }
-    
-            sb ??= new StringBuilder(input, 0, i, input.Length);
-            sb.Append(folded);
+
+            return sb?.ToString() ?? input;
         }
-    
-        return sb?.ToString() ?? input;
     }
 
     // True for the shell's `backup …` family, with everything after the verb handed back as arguments.
@@ -319,13 +414,32 @@ internal static class SqlKind
     // Returns the connection string with key=value set, replacing any existing occurrence of the key.
     internal static string WithKey(string connectionString, string key, string value)
     {
+        EnsureValueCarriable(key, value);
+
         List<string> parts = connectionString
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(p => !p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
             .ToList();
-    
+
         parts.Add($"{key}={value}");
         return string.Join(';', parts);
+    }
+
+    // The driver parses connection strings by splitting on ';' and has no quoting or escaping for
+    // values, so a ';' inside a value would terminate it early — and a value like
+    // `x;Endpoint=http://evil:5096` would hijack every key after it, credentials included.
+    // Refuse rather than corrupt or redirect: the error names the offending key so the fix is
+    // obvious (for credentials: pass -u and let the shell prompt, or set CAMUS_PASSWORD).
+    private static void EnsureValueCarriable(string key, string value)
+    {
+        if (value.Contains(';'))
+        {
+            throw new ArgumentException(
+                $"The value for '{key}' contains ';' (0x3B), which a CamusDB connection string cannot carry: " +
+                "values can be neither quoted nor escaped. Remove the ';' (for a password, log in with -u and let " +
+                "the shell prompt, or set CAMUS_PASSWORD).",
+                nameof(value));
+        }
     }
 
     internal static bool HasKey(string connectionString, string key)
@@ -356,12 +470,58 @@ internal static class SqlKind
 
     internal static string SwapDatabase(string connectionString, string newDatabase)
     {
+        EnsureValueCarriable("Database", newDatabase);
+
         List<string> parts = connectionString
             .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Where(p => !p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase))
             .ToList();
-    
+
         parts.Add($"Database={newDatabase}");
         return string.Join(';', parts);
+    }
+
+    // True when this connection string would put credentials on the wire in cleartext: a User,
+    // Password or AccessToken key is present, and an http:// Endpoint (or BackupEndpoint) names a
+    // host other than this machine. Whether TLS is actually enforced is the server's decision and
+    // can be turned off, so this client-side check is the only notice the user gets before a
+    // misconfigured server receives the password in the clear.
+    internal static bool SendsCredentialsCleartext(string connectionString)
+    {
+        bool hasCredentials =
+            !string.IsNullOrEmpty(GetConnValue(connectionString, "User")) ||
+            !string.IsNullOrEmpty(GetConnValue(connectionString, "Password")) ||
+            !string.IsNullOrEmpty(GetConnValue(connectionString, "AccessToken"));
+
+        return hasCredentials &&
+            (IsCleartextRemote(GetConnValue(connectionString, "Endpoint")) ||
+             IsCleartextRemote(GetConnValue(connectionString, "BackupEndpoint")));
+    }
+
+    // True for an http:// endpoint naming a host other than this machine. The loopback default
+    // that local development uses stays quiet; a LAN name, a routable IP, or a public host is
+    // worth naming. Endpoint accepts a comma-separated pool, so each member stands on its own.
+    private static bool IsCleartextRemote(string? endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint) || !endpoint.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        foreach (string candidate in endpoint.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!Uri.TryCreate(candidate, UriKind.Absolute, out Uri? uri))
+                continue;
+
+            string host = uri.Host;
+
+            bool loopback = string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase) ||
+                host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
+                host.StartsWith("127.", StringComparison.Ordinal) ||
+                host is "::1" or "[::1]";
+
+            if (!loopback)
+                return true;
+        }
+
+        return false;
     }
 }

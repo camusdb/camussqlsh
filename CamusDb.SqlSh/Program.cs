@@ -71,6 +71,16 @@ Options? opts = optsResult.Value;
 if (opts is null)
     return;
 
+// A password in argv is readable by every local user (ps, /proc/<pid>/cmdline) and lands in the
+// invoking shell's own history. The option still works — removing it outright would break
+// scripts — but each use gets told the safer spellings, on stderr so -e/-f stdout stays clean.
+if (!string.IsNullOrEmpty(opts.Password))
+{
+    Console.Error.WriteLine(
+        "Warning: -p on the command line exposes the password to other local users and to your shell history. " +
+        "Prefer running with -u alone (the shell prompts without echoing) or the CAMUS_PASSWORD environment variable.");
+}
+
 // -e and -f both run SQL and exit; the shell never prompts in that case, so it also keeps stdout
 // clean of the connection banner. "-f -" reads the script from standard input, so a heredoc or a
 // pipe works the same as a file on disk.
@@ -127,9 +137,29 @@ if (debugKeys)
     return;
 }
 
-string historyPath = Path.GetTempPath() + Path.PathSeparator + "camusdb.history.json";
+// The statement history is per-user state, so it lives under the user's own profile with
+// owner-only permissions — never in the shared temp directory, where a fixed name would let any
+// other local user read or clobber it (and where a path-separator typo once named the file with
+// a literal ':' in it). --no-history skips the file entirely.
+const int MaxHistoryEntries = 2000;
 
-List<string>? history = await GetHistory(historyPath);
+string historyPath = UserPaths.HistoryPath;
+
+List<string>? history = null;
+
+if (!opts.NoHistory)
+{
+    try
+    {
+        UserPaths.EnsureStateDirectory();
+        history = await GetHistory(historyPath);
+    }
+    catch (Exception ex)
+    {
+        // History is a convenience; an unusable state directory shouldn't cost the session.
+        Console.Error.WriteLine($"Warning: statement history is disabled ({ex.Message}).");
+    }
+}
 
 // Credentials come from the flags, then the environment. A user given without a password is
 // prompted for one (silently skipped when stdin is piped, so scripts aren't left hanging on a
@@ -142,13 +172,14 @@ string? authToken = opts.AccessToken ?? Environment.GetEnvironmentVariable("CAMU
 if (!string.IsNullOrEmpty(authUser) && string.IsNullOrEmpty(authPassword) && string.IsNullOrEmpty(authToken))
     authPassword = PromptPassword();
 
-List<string> connectionAttempts = BuildConnectionAttempts(opts, authUser, authPassword, authToken);
-
 CamusConnection connection;
 string activeConnectionString;
 
 try
 {
+    // Inside the try: a credential the connection string can't carry (a ';' in a password, say)
+    // is refused here with a diagnosable message, not a raw stack trace.
+    List<string> connectionAttempts = BuildConnectionAttempts(opts, authUser, authPassword, authToken);
     (connection, activeConnectionString) = await ConnectionHelper.OpenFirstAsync(connectionAttempts);
 }
 catch (Exception ex)
@@ -156,6 +187,16 @@ catch (Exception ex)
     WriteConnectionError(ex);
     Environment.ExitCode = 1;
     return;
+}
+
+// The server decides whether to refuse credentials over plaintext (and can be started not to),
+// so the client is the only place that can warn before the password is already on the wire.
+// stderr again: scripted runs keep their stdout parseable.
+if (SendsCredentialsCleartext(activeConnectionString))
+{
+    Console.Error.WriteLine(
+        "Warning: credentials are being sent over plaintext HTTP to a non-localhost endpoint. " +
+        "Use an https:// endpoint so the server cannot receive them in the clear.");
 }
 
 // Tell the user where and how they connected, unless they're scripting with -e/-f (keep stdout clean).
@@ -594,18 +635,32 @@ if (richEditorSupported)
     }
 }
 
-Console.CancelKeyPress += delegate
+Console.CancelKeyPress += (_, e) =>
 {
+    // Take the shutdown over from the default kill: cancelling keeps the process alive just long
+    // enough for a bounded, best-effort rollback and history save, then exits here. Blocking this
+    // handler outright (.Wait()) risks a frozen process the user already tried to kill, while
+    // returning without cancelling would kill the rollback mid-flight.
+    e.Cancel = true;
+
     AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
 
-    if (transaction is not null)
-    {        
-        AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
-
-        ExecuteRollbackTx(connection).Wait();
-    }
-    
-    SaveHistory(historyPath, history).Wait();
+    _ = Task.Run(async () =>
+    {
+        try
+        {
+            await ShutdownAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch
+        {
+            // Shutdown is best-effort: a hung rollback or an unwritable history file must not
+            // keep the shell alive after the user asked it to die.
+        }
+        finally
+        {
+            Environment.Exit(0);
+        }
+    });
 };
 
 if (sqlCompletion is not null && HasDatabase(activeConnectionString))
@@ -644,12 +699,18 @@ if (tuiMode)
         FormatValue,
         sharedHighlighter!,
         sqlCompletion,
-        Path.Combine(Path.GetTempPath(), "camusdb.query.sql"));
+        UserPaths.QueryScratchPath);
 
     return;
 }
 
 StringBuilder pendingSql = new();
+
+// Folds smart quotes for everything typed at the prompt. One instance serves the whole session
+// so a string literal spanning lines (accumulated through pendingSql) folds as one statement —
+// it is reset whenever a statement completes or an accumulation is abandoned, so a dangling
+// quote can't leak into later statements.
+SmartQuoteFolder promptFolder = new();
 
 // The last statement handed to the server, for `show prepared` to report on.
 string? lastExecutedSql = null;
@@ -678,18 +739,13 @@ while (true)
             if (pendingSql.Length > 0)
             {
                 pendingSql.Clear();
+                promptFolder.Reset();
                 continue;
             }
 
             AnsiConsole.MarkupLine("[cyan]\nExiting...[/]");
 
-            if (transaction is not null)
-            {
-                AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
-                await ExecuteRollbackTx(connection);
-            }
-
-            await SaveHistory(historyPath, history);
+            await ShutdownAsync();
             break;
         }
 
@@ -698,8 +754,9 @@ while (true)
 
         // Pasted SQL often carries "smart" curly quotes (from editors/chat apps) that the parser
         // doesn't recognize as string delimiters. Fold them back to straight quotes so the
-        // statement both parses server-side and is seen as complete here.
-        sql = NormalizeSmartQuotes(sql);
+        // statement both parses server-side and is seen as complete here — but only outside
+        // string literals, so a ’ that is genuinely part of a value survives.
+        sql = promptFolder.Fold(sql);
 
         string sqlTrim = sql.Trim();
 
@@ -769,6 +826,7 @@ while (true)
         }
 
         pendingSql.Clear();
+        promptFolder.Reset();
         lastSql = executableSql;
         lastExecutedSql = executableSql;
 
@@ -861,6 +919,10 @@ async IAsyncEnumerable<SqlStatement> ReadStatements(TextReader reader)
 {
     SqlScanner scanner = new();
 
+    // One folder per script so quote state survives across lines: a string literal spanning
+    // lines keeps its interior characters unfenced from folding.
+    SmartQuoteFolder folder = new();
+
     while (true)
     {
         string? line = await reader.ReadLineAsync();
@@ -868,7 +930,7 @@ async IAsyncEnumerable<SqlStatement> ReadStatements(TextReader reader)
         // Fold smart quotes per line so -f files and `source` benefit the way the prompt does.
         IEnumerable<SqlStatement> statements = line is null
             ? scanner.Flush()
-            : scanner.Feed(NormalizeSmartQuotes(line) + "\n");
+            : scanner.Feed(folder.Fold(line) + "\n");
 
         foreach (SqlStatement statement in statements)
             yield return statement;
@@ -1013,8 +1075,34 @@ static bool IsSqlIncomplete(string input)
 
 static async Task SaveHistory(string historyPath, List<string>? history)
 {
-    if (history is not null)
-        await File.WriteAllTextAsync(historyPath, JsonSerializer.Serialize(history));
+    if (history is null)
+        return;
+
+    // Cap the file so a long session (or heavy -e scripting) can't grow it without bound; the
+    // oldest entries drop off.
+    List<string> entries = history.Count > MaxHistoryEntries
+        ? history[^MaxHistoryEntries..]
+        : history;
+
+    Directory.CreateDirectory(Path.GetDirectoryName(historyPath)!);
+
+    // Write to a sibling temp file, then rename over the target: a crash never leaves a
+    // half-written file, and the rename replaces (rather than follows) anything planted at the
+    // target path. The temp file is created with owner-only permissions before any content is
+    // written, so the history — which holds the user's SQL — is never briefly world-readable.
+    string tempPath = historyPath + ".tmp";
+    string json = JsonSerializer.Serialize(entries);
+
+    await using (FileStream stream = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+    {
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(stream.SafeFileHandle, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        await using (StreamWriter writer = new(stream))
+            await writer.WriteAsync(json);
+    }
+
+    File.Move(tempPath, historyPath, overwrite: true);
 }
 
 // True when the statement inlines a password, i.e. CREATE USER / ALTER USER … IDENTIFIED
@@ -1111,6 +1199,18 @@ async Task ExecuteRollbackTx(CamusConnection connection)
     }
 }
 
+// What Ctrl+C and a clean exit both want: undo an open transaction and persist the history.
+async Task ShutdownAsync()
+{
+    if (transaction is not null)
+    {
+        AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
+        await ExecuteRollbackTx(connection);
+    }
+
+    await SaveHistory(historyPath, history);
+}
+
 async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = false)
 {
     await using CamusCommand cmd = connection.CreateSelectCommand(sql);
@@ -1145,8 +1245,11 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
                 Border = TableBorder.Square
             };
 
+            // Column names come from the server, so they're data like everything else it sends:
+            // escaped the same way, since a name with '[' or Spectre markup in it (possible from
+            // a backtick-quoted identifier) would otherwise render as markup or throw mid-run.
             foreach (KeyValuePair<string, ColumnValue> item in current)
-                table.AddColumn(item.Key);
+                table.AddColumn(Markup.Escape(item.Key));
         }
 
         string[] row = new string[current.Count];
@@ -1802,6 +1905,11 @@ static async Task<List<string>> GetHistory(string historyPath)
     history ??= [];
     history = RemoveAdjacentDuplicates(history);
 
+    // Same cap on load: a file grown elsewhere (or by an older version) costs one trim now
+    // rather than an ever-larger file on every save.
+    if (history.Count > MaxHistoryEntries)
+        history = history[^MaxHistoryEntries..];
+
     return history;
 }
 
@@ -1835,8 +1943,11 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                first error. Use [cyan]-f -[/] to read the script from standard input");
     AnsiConsole.MarkupLine("  -u, --user                    User to authenticate as (only needed on a server with");
     AnsiConsole.MarkupLine("                                authentication enabled)");
-    AnsiConsole.MarkupLine("  -p, --password                That user's password; prompted for when -u is given without it");
+    AnsiConsole.MarkupLine("  -p, --password                That user's password. Prefer the prompt (run with -u alone) or");
+    AnsiConsole.MarkupLine("                                CAMUS_PASSWORD: on the command line it is visible to");
+    AnsiConsole.MarkupLine("                                every other process on the machine");
     AnsiConsole.MarkupLine("  --token                       Use a bearer token obtained elsewhere instead of logging in");
+    AnsiConsole.MarkupLine("  --no-history                  Do not load or save the statement history");
     AnsiConsole.MarkupLine("  --tui                         Open the full-screen browser: catalog, editor and results");
     AnsiConsole.MarkupLine("                                in three panes. TAB moves between panes, F5 runs the query");
     AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");
@@ -1866,6 +1977,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  --no-prepare                  Run statements inline instead of preparing them, to measure");
     AnsiConsole.MarkupLine("                                against the default prepared path");
     AnsiConsole.MarkupLine("  -u, --user / -p, --password   Credentials for an authenticated server");
+    AnsiConsole.MarkupLine("                                (prefer CAMUS_PASSWORD over -p; see the shell's -p above)");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Shell commands:[/]");
     AnsiConsole.MarkupLine("  [cyan]use[/] <database>              Switch the current database; the name may be");
@@ -1908,8 +2020,7 @@ static void PrintHelp()
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");
-    AnsiConsole.MarkupLine("  camus-cli mydb -u app -p app-secret");
-    AnsiConsole.MarkupLine("  camus-cli mydb -u app                     [grey58](prompts for the password)[/]");
+    AnsiConsole.MarkupLine("  camus-cli mydb -u app                     [grey58](prompts for the password; or set CAMUS_PASSWORD)[/]");
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
     AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
@@ -2226,9 +2337,12 @@ public sealed class Options
     [Option('u', "user", Required = false, HelpText = "User to authenticate as")]
     public string? User { get; set; }
 
-    [Option('p', "password", Required = false, HelpText = "That user's password (prompted for when omitted)")]
+    [Option('p', "password", Required = false, HelpText = "That user's password (prefer the prompt or CAMUS_PASSWORD: on the command line it is visible to other users)")]
     public string? Password { get; set; }
 
     [Option("token", Required = false, HelpText = "Use a bearer token obtained elsewhere instead of logging in")]
     public string? AccessToken { get; set; }
+
+    [Option("no-history", Required = false, HelpText = "Do not load or save the statement history")]
+    public bool NoHistory { get; set; }
 }

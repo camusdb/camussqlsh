@@ -8,12 +8,22 @@
 
 using CamusDB.Client;
 using Spectre.Console;
+using static SqlKind;
 
 internal static class WorkloadCommand
 {
     internal static async Task RunAsync(string[] args)
     {
         WorkloadArgs wa = ParseArgs(args);
+
+        // A password in argv is readable by every local user (ps, /proc) and lands in the
+        // invoking shell's history. The flag still works, but every use is told the safer one.
+        if (wa.PasswordFromFlag)
+        {
+            AnsiConsole.MarkupLine(
+                "[yellow]Warning:[/] -p on the command line exposes the password to other local users and to your " +
+                "shell history. Prefer the [cyan]CAMUS_PASSWORD[/] environment variable.");
+        }
 
         if (wa.Command != "init" && wa.Command != "run")
         {
@@ -32,7 +42,8 @@ internal static class WorkloadCommand
             AnsiConsole.MarkupLine("  --no-prepare             Run every statement inline instead of preparing it, to compare");
             AnsiConsole.MarkupLine("                           against the default prepared path");
             AnsiConsole.MarkupLine("  -u, --user NAME          User to authenticate as (authenticated servers only)");
-            AnsiConsole.MarkupLine("  -p, --password SECRET    That user's password");
+            AnsiConsole.MarkupLine("  -p, --password SECRET    That user's password (prefer CAMUS_PASSWORD: on the command");
+            AnsiConsole.MarkupLine("                           line it is visible to every other process on the machine)");
             return;
         }
 
@@ -59,19 +70,30 @@ internal static class WorkloadCommand
             return;
         }
 
-        List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password, wa.NoPrepare);
-        AnsiConsole.MarkupLine("Connecting to [blue]{0}[/]...", Markup.Escape(GetConnValue(attempts[0], "Endpoint") ?? "server"));
-
         CamusConnection conn;
         string connStr;
         try
         {
+            // Inside the try: a value the connection string can't carry (a ';' in a password,
+            // say) is refused here with a diagnosable message, not a raw stack trace.
+            List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password, wa.NoPrepare);
+            AnsiConsole.MarkupLine("Connecting to [blue]{0}[/]...", Markup.Escape(GetConnValue(attempts[0], "Endpoint") ?? "server"));
+
             (conn, connStr) = await ConnectionHelper.OpenFirstAsync(attempts);
         }
         catch (Exception ex)
         {
             AnsiConsole.MarkupLine("[red]Connection failed:[/] {0}", Markup.Escape(ex.Message));
             return;
+        }
+
+        // The server decides whether to refuse credentials over plaintext (and can be started
+        // not to), so the client is the only place that can warn before the password is on the wire.
+        if (SendsCredentialsCleartext(connStr))
+        {
+            AnsiConsole.MarkupLine(
+                "[yellow]Warning:[/] credentials are being sent over plaintext HTTP to a non-localhost endpoint. " +
+                "Use an [cyan]https://[/] endpoint so the server cannot receive them in the clear.");
         }
 
         // Every transaction a workload opens — seeding included — carries these knobs explicitly, so
@@ -203,6 +225,9 @@ internal static class WorkloadCommand
         string? user = Environment.GetEnvironmentVariable("CAMUS_USER");
         string? password = Environment.GetEnvironmentVariable("CAMUS_PASSWORD");
 
+        // Remember whether the password came in over the command line, so the caller can warn.
+        bool passwordFromFlag = false;
+
         for (int i = 2; i < args.Length; i++)
         {
             switch (args[i])
@@ -238,12 +263,16 @@ internal static class WorkloadCommand
                     break;
                 case "-p":
                 case "--password":
-                    if (i + 1 < args.Length) password = args[++i];
+                    if (i + 1 < args.Length)
+                    {
+                        password = args[++i];
+                        passwordFromFlag = true;
+                    }
                     break;
             }
         }
 
-        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password, noPrepare);
+        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password, noPrepare, passwordFromFlag);
     }
 
     // Canonical connection-string value for --locking, or null if the value is unrecognized.
@@ -332,17 +361,6 @@ internal static class WorkloadCommand
     private static string DescribeTransport(string connectionString)
         => string.Equals(GetConnValue(connectionString, "Protocol"), "grpc", StringComparison.OrdinalIgnoreCase) ? "gRPC" : "REST";
 
-    // Returns the value of a connection-string key, or null when the key is absent.
-    private static string? GetConnValue(string connectionString, string key)
-    {
-        return connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-            .Where(p => p.Length == 2 && string.Equals(p[0], key, StringComparison.OrdinalIgnoreCase))
-            .Select(p => p[1])
-            .FirstOrDefault();
-    }
-
     // Sets key=value when the user passed the flag (value != null), otherwise falls back to
     // defaultValue only if the connection string doesn't already carry the key.
     private static string ApplyKey(string connectionString, string key, string? value, string defaultValue)
@@ -353,24 +371,6 @@ internal static class WorkloadCommand
         return HasKey(connectionString, key)
             ? connectionString
             : WithKey(connectionString, key, defaultValue);
-    }
-
-    private static bool HasKey(string connectionString, string key)
-    {
-        return connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Any(p => p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase));
-    }
-
-    private static string WithKey(string connectionString, string key, string value)
-    {
-        List<string> parts = connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(p => !p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        parts.Add($"{key}={value}");
-        return string.Join(';', parts);
     }
 }
 
@@ -386,5 +386,6 @@ internal record WorkloadArgs(
     string? Isolation,
     string? User = null,
     string? Password = null,
-    bool NoPrepare = false
+    bool NoPrepare = false,
+    bool PasswordFromFlag = false
 );
