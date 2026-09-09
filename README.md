@@ -59,6 +59,7 @@ exactly as before. Against a server started with `CAMUSDB_AUTH_ENABLED=true`, pa
 
 ```shell
 $ camus-cli northwind -u app                 # prompts: Password:
+$ camus-cli northwind -u app -p              # -p with no value prompts too
 $ CAMUS_PASSWORD=app-secret camus-cli northwind -u app
 ```
 
@@ -74,6 +75,9 @@ Credentials can also come from `CAMUS_USER` / `CAMUS_PASSWORD`, or straight from
 string (`-c "…;User=app;Password=app-secret"`). A flag wins over the same key inside `-c`. When
 another process already holds a token, hand it over with `--token` instead of a password — it is
 used verbatim and never renewed, so its expiry ends the session.
+
+A password that carries a `;`, or that begins or ends with a space, is quoted for the connection
+string, so every password the prompt accepts also reaches the server unchanged.
 
 Prefer the environment or the interactive prompt over `-p` on a shared host: a command line is
 readable by every process on the machine.
@@ -104,8 +108,25 @@ Two errors are worth recognizing:
 | `CADB0516` | Not authenticated — missing, invalid, or expired credentials. The server returns the same code for a wrong password and an unknown user, so replies can't be used to enumerate accounts. |
 | `CADB0517` | Authenticated, but missing a privilege on a table the statement touches — including tables reached through joins and subqueries. Fix it with a `GRANT`, not by re-authenticating. |
 
-With authentication on, the server refuses credentials over plaintext (`CADB0519`) unless the peer
-is loopback: use an `https://` endpoint against any remote deployment.
+### Plaintext endpoints
+
+Credentials are refused over plaintext (`CADB0519`) unless the endpoint is loopback. The driver
+makes that check itself, when it parses the connection string, so the shell stops **before** the
+password reaches the network — a server that was started without its own check never sees it:
+
+```text
+$ camus-cli northwind -c "Endpoint=http://db.internal:5095" -u app
+Connection failed (CADB0519): This connection string configures credentials against the Endpoint
+'http://db.internal:5095', which is neither https nor loopback.
+```
+
+Use an `https://` endpoint against any remote deployment.
+
+Both ends raise `CADB0519`, and each is waived on its own. Where TLS terminates in front of the
+server and the last hop is inside the trust boundary, pass `--allow-insecure-credentials` to the
+shell, and start the server with `--require-tls-when-auth-enabled false`. The shell then names what
+the waiver allows on stderr and connects. Nothing verifies that the link is safe, so use the waiver
+only when it is.
 
 ## Command Line Options
 
@@ -120,8 +141,9 @@ camus-cli [database] [options]
 | `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
 | `-f`, `--file` | Execute the statements in a `.sql` file and exit, stopping at the first error. Use `-f -` to read the script from standard input. See [Running a .sql File](#running-a-sql-file). |
 | `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
-| `-p`, `--password` | That user's password. When `-u` is given without it, the shell prompts (without echoing). Prefer the prompt or `CAMUS_PASSWORD`: on the command line the password is visible to every other process on the machine, and each use prints a warning. |
+| `-p`, `--password` | That user's password. Give `-p` with no value to be prompted for it (without echoing); `-u` alone prompts too. Prefer the prompt or `CAMUS_PASSWORD`: on the command line the password is visible to every other process on the machine, and each use prints a warning. |
 | `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
+| `--allow-insecure-credentials` | Send credentials to a plaintext `http://` endpoint that is not on this machine. Refused without it. See [Plaintext endpoints](#plaintext-endpoints). |
 | `--no-history` | Do not load or save the statement history. |
 | `--tui` | Open the full-screen mode: catalog, editor and results in three panes. Needs an ANSI terminal. See [Full-Screen Mode](#full-screen-mode---tui). |
 | `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
@@ -661,6 +683,36 @@ rollback;
 ```
 
 Only one active transaction is allowed at a time. If `commit` or `rollback` fails, the shell clears its local transaction state so a new transaction can be started.
+
+With [learned routing](#learned-routing) on, the driver defers `BEGIN` to the first statement of
+the transaction, so the transaction starts on the node that leads that statement's data. The shell
+reports `begin` as it always did; a server that refuses the `BEGIN` reports it on the first
+statement instead. With routing off — the default — `BEGIN` is sent when you type it.
+
+## Learned routing
+
+A CamusDB server can attach advisory routing metadata to a successful response: which node leads
+the data behind that statement. The driver learns from it and sends the statement's later
+executions straight to that node, which saves a forwarding hop. It changes no result and no
+isolation level; it is a latency optimization only.
+
+The shell turns it on through the connection string, because the trust map is a deployment's own
+list of nodes:
+
+```shell
+$ camus-cli northwind -c "Endpoint=http://a:5095,http://b:5095,http://c:5095;RoutingMode=Learned;\
+RoutingNodes='camus-a:7070=http://a:5095,camus-b:7070=http://b:5095,camus-c:7070=http://c:5095'"
+```
+
+| Key | Description |
+| --- | --- |
+| `RoutingMode` | `Auto` (the default: routing engages only when `RoutingNodes` maps two or more distinct endpoints), `Learned`, or `Off`. |
+| `RoutingNodes` | Maps each server node identity to a member of the `Endpoint` pool. Quote the value: it carries `=`. An address that the `Endpoint` pool does not list is dropped, so a reply can never steer the shell at a node the operator did not name. |
+| `RoutingMaxHintAge` | Ceiling in milliseconds on how long one learned route is reused (default `5000`). |
+
+A connection string without `RoutingNodes` sends exactly what a pre-routing driver sent. `use
+<database>` and the shell's system-level commands keep every routing key, so routing survives a
+database switch.
 
 ## Backups
 

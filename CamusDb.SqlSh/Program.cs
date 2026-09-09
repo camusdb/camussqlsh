@@ -52,6 +52,11 @@ bool diagnoseTerminal = ConsumeFlag(ref args, "--diagnose-terminal");
 bool forceRich = ConsumeFlag(ref args, "--force-rich")
     || IsTruthy(Environment.GetEnvironmentVariable("CAMUS_FORCE_RICH"));
 
+// A bare -p means "ask me for the password", the way mysql(1) spells it. CommandLineParser binds
+// -p to whatever token follows it, so `-p -u alice` would otherwise take "-u" as the password and
+// leave the shell with no user at all. Consume that spelling here and prompt later instead.
+bool promptForPassword = ConsumePasswordPrompt(ref args);
+
 // Some capable terminals (e.g. Rio) advertise a TERM value that Spectre.Console's ANSI
 // detector doesn't recognize, so it disables the rich editor even though the terminal
 // handles ANSI fine. Forcing the capabilities lets the whole app render richly.
@@ -169,16 +174,26 @@ string? authUser = opts.User ?? Environment.GetEnvironmentVariable("CAMUS_USER")
 string? authPassword = opts.Password ?? Environment.GetEnvironmentVariable("CAMUS_PASSWORD");
 string? authToken = opts.AccessToken ?? Environment.GetEnvironmentVariable("CAMUS_ACCESS_TOKEN");
 
-if (!string.IsNullOrEmpty(authUser) && string.IsNullOrEmpty(authPassword) && string.IsNullOrEmpty(authToken))
+// A bare -p asks for the prompt outright, so it wins over CAMUS_PASSWORD. Without it, a user
+// given with no password at all is prompted too.
+if (promptForPassword)
+    authPassword = PromptPassword() ?? authPassword;
+else if (!string.IsNullOrEmpty(authUser) && string.IsNullOrEmpty(authPassword) && string.IsNullOrEmpty(authToken))
     authPassword = PromptPassword();
+
+// A password with nobody to authenticate as is a typo, and the server would refuse it with a
+// message that names neither flag.
+if (promptForPassword && string.IsNullOrEmpty(authUser))
+    Console.Error.WriteLine("Warning: -p was given without -u, so the shell connects unauthenticated. Add -u <user>.");
 
 CamusConnection connection;
 string activeConnectionString;
 
 try
 {
-    // Inside the try: a credential the connection string can't carry (a ';' in a password, say)
-    // is refused here with a diagnosable message, not a raw stack trace.
+    // Inside the try: the driver validates the connection string as it is parsed — a duplicate key,
+    // or credentials against a plaintext endpoint — so a rejection is reported here with a
+    // diagnosable message, not a raw stack trace.
     List<string> connectionAttempts = BuildConnectionAttempts(opts, authUser, authPassword, authToken);
     (connection, activeConnectionString) = await ConnectionHelper.OpenFirstAsync(connectionAttempts);
 }
@@ -189,14 +204,14 @@ catch (Exception ex)
     return;
 }
 
-// The server decides whether to refuse credentials over plaintext (and can be started not to),
-// so the client is the only place that can warn before the password is already on the wire.
-// stderr again: scripted runs keep their stdout parseable.
+// Only reached when the connection string waives the driver's own refusal, which nothing here can
+// second-guess: the shell names what the waiver allows and connects. stderr again, so scripted runs
+// keep their stdout parseable.
 if (SendsCredentialsCleartext(activeConnectionString))
 {
     Console.Error.WriteLine(
-        "Warning: credentials are being sent over plaintext HTTP to a non-localhost endpoint. " +
-        "Use an https:// endpoint so the server cannot receive them in the clear.");
+        "Warning: credentials are being sent over plaintext HTTP to a non-localhost endpoint, " +
+        "because AllowInsecureCredentials is set. Use an https:// endpoint unless the link itself protects them.");
 }
 
 // Tell the user where and how they connected, unless they're scripting with -e/-f (keep stdout clean).
@@ -1772,9 +1787,11 @@ const int DefaultGrpcPort = 5096;
 // When the caller pins Protocol= explicitly, that choice is honored with no fallback.
 static List<string> BuildConnectionAttempts(Options opts, string? user, string? password, string? token)
 {
+    bool allowInsecure = opts.AllowInsecureCredentials;
+
     if (!string.IsNullOrEmpty(opts.ConnectionSource))
     {
-        string cs = WithCredentials(EnsureDatabase(opts.ConnectionSource), user, password, token);
+        string cs = WithCredentials(EnsureDatabase(opts.ConnectionSource), user, password, token, allowInsecure);
 
         // Respect an explicit Protocol= — the user has chosen the transport deliberately.
         if (HasKey(cs, "Protocol"))
@@ -1794,15 +1811,19 @@ static List<string> BuildConnectionAttempts(Options opts, string? user, string? 
     [
         WithCredentials(
             WithBackupEndpoint($"Endpoint=http://localhost:{DefaultGrpcPort};Database={db};Protocol=grpc", $"http://localhost:{DefaultRestPort}"),
-            user, password, token),
-        WithCredentials($"Endpoint=http://localhost:{DefaultRestPort};Database={db};Protocol=rest", user, password, token),
+            user, password, token, allowInsecure),
+        WithCredentials($"Endpoint=http://localhost:{DefaultRestPort};Database={db};Protocol=rest", user, password, token, allowInsecure),
     ];
 }
 
 // Adds the authentication keys the driver understands. Credentials passed on the command line (or
 // in the environment) win over the same key inside -c, since they were given more deliberately;
 // anything not supplied is left untouched, so a -c that already carries them still works.
-static string WithCredentials(string connectionString, string? user, string? password, string? token)
+//
+// --allow-insecure-credentials adds the key that waives the driver's own refusal to carry
+// credentials to a plaintext endpoint that is not loopback. A -c that already sets the key keeps
+// its value, because both spellings say the same thing.
+static string WithCredentials(string connectionString, string? user, string? password, string? token, bool allowInsecure = false)
 {
     if (!string.IsNullOrEmpty(user))
         connectionString = WithKey(connectionString, "User", user);
@@ -1812,6 +1833,9 @@ static string WithCredentials(string connectionString, string? user, string? pas
 
     if (!string.IsNullOrEmpty(token))
         connectionString = WithKey(connectionString, "AccessToken", token);
+
+    if (allowInsecure && !HasKey(connectionString, "AllowInsecureCredentials"))
+        connectionString = WithKey(connectionString, "AllowInsecureCredentials", "true");
 
     return connectionString;
 }
@@ -1847,8 +1871,12 @@ static void WriteConnectionError(Exception ex)
             AnsiConsole.MarkupLine("[grey58]Too many login attempts for this account; the server rate-limits logins per minute. Wait and retry.[/]");
             break;
 
+        // Both ends raise this code. The driver refuses before the password leaves this process;
+        // the server refuses on arrival. Each end is waived separately, so name both fixes.
         case "CADB0519":
-            AnsiConsole.MarkupLine("[grey58]The server refuses credentials over plaintext. Use an[/] [cyan]https://[/] [grey58]endpoint, or start the server with[/] [cyan]--require-tls-when-auth-enabled false[/] [grey58]when TLS terminates in front of it.[/]");
+            AnsiConsole.MarkupLine("[grey58]Credentials are refused over plaintext: the password and the bearer token would cross the network in the clear.[/]");
+            AnsiConsole.MarkupLine("[grey58]Use an[/] [cyan]https://[/] [grey58]endpoint.[/]");
+            AnsiConsole.MarkupLine("[grey58]When TLS terminates in front of the server, pass[/] [cyan]--allow-insecure-credentials[/] [grey58]here, and start the server with[/] [cyan]--require-tls-when-auth-enabled false[/][grey58].[/]");
             break;
     }
 }
@@ -1874,14 +1902,9 @@ static string WithBackupEndpoint(string connectionString, string? endpoint)
 // Human-readable transport name for the resolved connection string (Protocol= defaults to REST).
 static string DescribeTransport(string connectionString)
 {
-    string? protocol = connectionString
-        .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-        .Where(p => p.Length == 2 && string.Equals(p[0], "Protocol", StringComparison.OrdinalIgnoreCase))
-        .Select(p => p[1])
-        .FirstOrDefault();
-
-    return string.Equals(protocol, "grpc", StringComparison.OrdinalIgnoreCase) ? "gRPC" : "REST";
+    return string.Equals(GetConnValue(connectionString, "Protocol"), "grpc", StringComparison.OrdinalIgnoreCase)
+        ? "gRPC"
+        : "REST";
 }
 
 
@@ -1943,10 +1966,13 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                first error. Use [cyan]-f -[/] to read the script from standard input");
     AnsiConsole.MarkupLine("  -u, --user                    User to authenticate as (only needed on a server with");
     AnsiConsole.MarkupLine("                                authentication enabled)");
-    AnsiConsole.MarkupLine("  -p, --password                That user's password. Prefer the prompt (run with -u alone) or");
-    AnsiConsole.MarkupLine("                                CAMUS_PASSWORD: on the command line it is visible to");
-    AnsiConsole.MarkupLine("                                every other process on the machine");
+    AnsiConsole.MarkupLine("  -p, --password                That user's password. Give [cyan]-p[/] with no value to be prompted");
+    AnsiConsole.MarkupLine("                                for it, or set CAMUS_PASSWORD: on the command line the password");
+    AnsiConsole.MarkupLine("                                is visible to every other process on the machine");
     AnsiConsole.MarkupLine("  --token                       Use a bearer token obtained elsewhere instead of logging in");
+    AnsiConsole.MarkupLine("  --allow-insecure-credentials  Send credentials to a plaintext [cyan]http://[/] endpoint that is not on this");
+    AnsiConsole.MarkupLine("                                machine. Refused without it, because the password and the token");
+    AnsiConsole.MarkupLine("                                would cross the network in the clear");
     AnsiConsole.MarkupLine("  --no-history                  Do not load or save the statement history");
     AnsiConsole.MarkupLine("  --tui                         Open the full-screen browser: catalog, editor and results");
     AnsiConsole.MarkupLine("                                in three panes. TAB moves between panes, F5 runs the query");
@@ -2034,6 +2060,33 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
     AnsiConsole.MarkupLine("  camus-cli workload init tpcb --database tpcb --rows 10000");
     AnsiConsole.MarkupLine("  camus-cli workload run tpcb --concurrency 8 --duration 120");
+}
+
+// True when argv holds a bare -p / --password: one that ends the arguments, or that is followed by
+// another option instead of a value. The token is removed so the parser cannot bind that following
+// option to it. `-p SECRET`, `-pSECRET` and `--password=SECRET` are values, and are left alone.
+static bool ConsumePasswordPrompt(ref string[] args)
+{
+    for (int i = 0; i < args.Length; i++)
+    {
+        if (args[i] != "-p" && args[i] != "--password")
+            continue;
+
+        if (i + 1 < args.Length && !LooksLikeOption(args[i + 1]))
+            return false;
+
+        args = [.. args[..i], .. args[(i + 1)..]];
+        return true;
+    }
+
+    return false;
+}
+
+// True for a token the parser reads as an option name. A single "-" is a value: -f - reads the
+// script from standard input.
+static bool LooksLikeOption(string arg)
+{
+    return arg.Length > 1 && arg[0] == '-';
 }
 
 static bool ConsumeFlag(ref string[] args, string flag)
@@ -2345,4 +2398,7 @@ public sealed class Options
 
     [Option("no-history", Required = false, HelpText = "Do not load or save the statement history")]
     public bool NoHistory { get; set; }
+
+    [Option("allow-insecure-credentials", Required = false, HelpText = "Send credentials to a plaintext http:// endpoint that is not on this machine")]
+    public bool AllowInsecureCredentials { get; set; }
 }

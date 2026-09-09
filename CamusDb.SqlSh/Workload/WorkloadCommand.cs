@@ -16,6 +16,10 @@ internal static class WorkloadCommand
     {
         WorkloadArgs wa = ParseArgs(args);
 
+        // A bare -p asks for the prompt outright, so it wins over CAMUS_PASSWORD.
+        if (wa.PromptPassword)
+            wa = wa with { Password = PromptPassword() ?? wa.Password };
+
         // A password in argv is readable by every local user (ps, /proc) and lands in the
         // invoking shell's history. The flag still works, but every use is told the safer one.
         if (wa.PasswordFromFlag)
@@ -42,8 +46,12 @@ internal static class WorkloadCommand
             AnsiConsole.MarkupLine("  --no-prepare             Run every statement inline instead of preparing it, to compare");
             AnsiConsole.MarkupLine("                           against the default prepared path");
             AnsiConsole.MarkupLine("  -u, --user NAME          User to authenticate as (authenticated servers only)");
-            AnsiConsole.MarkupLine("  -p, --password SECRET    That user's password (prefer CAMUS_PASSWORD: on the command");
-            AnsiConsole.MarkupLine("                           line it is visible to every other process on the machine)");
+            AnsiConsole.MarkupLine("  -p, --password SECRET    That user's password. Give -p with no value to be prompted for");
+            AnsiConsole.MarkupLine("                           it, or set CAMUS_PASSWORD: on the command line the password is");
+            AnsiConsole.MarkupLine("                           visible to every other process on the machine");
+            AnsiConsole.MarkupLine("  --allow-insecure-credentials");
+            AnsiConsole.MarkupLine("                           Send credentials to a plaintext http:// endpoint that is not on");
+            AnsiConsole.MarkupLine("                           this machine. Refused without it");
             return;
         }
 
@@ -74,9 +82,10 @@ internal static class WorkloadCommand
         string connStr;
         try
         {
-            // Inside the try: a value the connection string can't carry (a ';' in a password,
-            // say) is refused here with a diagnosable message, not a raw stack trace.
-            List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password, wa.NoPrepare);
+            // Inside the try: the driver validates the connection string as it is parsed — a
+            // duplicate key, or credentials against a plaintext endpoint — so a rejection is
+            // reported here with a diagnosable message, not a raw stack trace.
+            List<string> attempts = BuildConnectionAttempts(wa.ConnectionSource, wa.Database, locking, isolation, wa.User, wa.Password, wa.NoPrepare, wa.AllowInsecureCredentials);
             AnsiConsole.MarkupLine("Connecting to [blue]{0}[/]...", Markup.Escape(GetConnValue(attempts[0], "Endpoint") ?? "server"));
 
             (conn, connStr) = await ConnectionHelper.OpenFirstAsync(attempts);
@@ -87,13 +96,13 @@ internal static class WorkloadCommand
             return;
         }
 
-        // The server decides whether to refuse credentials over plaintext (and can be started
-        // not to), so the client is the only place that can warn before the password is on the wire.
+        // Only reached when the connection string waives the driver's own refusal, which nothing
+        // here can second-guess: name what the waiver allows and carry on.
         if (SendsCredentialsCleartext(connStr))
         {
             AnsiConsole.MarkupLine(
-                "[yellow]Warning:[/] credentials are being sent over plaintext HTTP to a non-localhost endpoint. " +
-                "Use an [cyan]https://[/] endpoint so the server cannot receive them in the clear.");
+                "[yellow]Warning:[/] credentials are being sent over plaintext HTTP to a non-localhost endpoint, " +
+                "because AllowInsecureCredentials is set. Use an [cyan]https://[/] endpoint unless the link itself protects them.");
         }
 
         // Every transaction a workload opens — seeding included — carries these knobs explicitly, so
@@ -201,6 +210,23 @@ internal static class WorkloadCommand
         }
     }
 
+    // True for a token the parser reads as an option name. A single "-" is a value.
+    private static bool LooksLikeOption(string arg)
+    {
+        return arg.Length > 1 && arg[0] == '-';
+    }
+
+    // Reads a password without echoing it. Returns null when there is no terminal to prompt on, so
+    // a scripted run fails on the server's authentication error rather than blocking here.
+    private static string? PromptPassword()
+    {
+        if (Console.IsInputRedirected)
+            return null;
+
+        string entered = AnsiConsole.Prompt(new TextPrompt<string>("Password:").Secret().AllowEmpty());
+        return string.IsNullOrEmpty(entered) ? null : entered;
+    }
+
     internal static WorkloadArgs ParseArgs(string[] args)
     {
         string command = args.Length > 0 ? args[0].ToLowerInvariant() : "";
@@ -227,6 +253,13 @@ internal static class WorkloadCommand
 
         // Remember whether the password came in over the command line, so the caller can warn.
         bool passwordFromFlag = false;
+
+        // A bare -p defers the password to a prompt, which the caller reads once parsing is done.
+        bool promptPassword = false;
+
+        // Waives the driver's refusal to carry credentials to a plaintext endpoint that is not
+        // loopback. Without it such a connection string is rejected before anything is sent.
+        bool allowInsecureCredentials = false;
 
         for (int i = 2; i < args.Length; i++)
         {
@@ -257,22 +290,31 @@ internal static class WorkloadCommand
                 case "--no-prepare":
                     noPrepare = true;
                     break;
+                case "--allow-insecure-credentials":
+                    allowInsecureCredentials = true;
+                    break;
                 case "-u":
                 case "--user":
                     if (i + 1 < args.Length) user = args[++i];
                     break;
                 case "-p":
                 case "--password":
-                    if (i + 1 < args.Length)
+                    // A bare -p means "ask me for the password", the way mysql(1) spells it. Taking
+                    // the next token unconditionally would eat the -u that follows it.
+                    if (i + 1 < args.Length && !LooksLikeOption(args[i + 1]))
                     {
                         password = args[++i];
                         passwordFromFlag = true;
+                    }
+                    else
+                    {
+                        promptPassword = true;
                     }
                     break;
             }
         }
 
-        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password, noPrepare, passwordFromFlag);
+        return new WorkloadArgs(command, workloadName, connectionSource, database, rows, concurrency, duration, locking, isolation, user, password, noPrepare, passwordFromFlag, promptPassword, allowInsecureCredentials);
     }
 
     // Canonical connection-string value for --locking, or null if the value is unrecognized.
@@ -311,18 +353,19 @@ internal static class WorkloadCommand
         string? isolation,
         string? user = null,
         string? password = null,
-        bool noPrepare = false)
+        bool noPrepare = false,
+        bool allowInsecureCredentials = false)
     {
         if (string.IsNullOrEmpty(connectionSource))
         {
             // No connection string: use the well-known local ports for each transport.
-            string grpc = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultGrpcPort};Database={database};Protocol=grpc", locking, isolation, user, password, noPrepare);
-            string rest = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultRestPort};Database={database};Protocol=rest", locking, isolation, user, password, noPrepare);
+            string grpc = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultGrpcPort};Database={database};Protocol=grpc", locking, isolation, user, password, noPrepare, allowInsecureCredentials);
+            string rest = ApplyWorkloadDefaults($"Endpoint=http://localhost:{DefaultRestPort};Database={database};Protocol=rest", locking, isolation, user, password, noPrepare, allowInsecureCredentials);
             return [grpc, rest];
         }
 
         string cs = HasKey(connectionSource, "Database") ? connectionSource : $"{connectionSource};Database={database}";
-        cs = ApplyWorkloadDefaults(cs, locking, isolation, user, password, noPrepare);
+        cs = ApplyWorkloadDefaults(cs, locking, isolation, user, password, noPrepare, allowInsecureCredentials);
 
         // Respect an explicit Protocol= — the user has chosen the transport deliberately.
         if (HasKey(cs, "Protocol"))
@@ -335,7 +378,7 @@ internal static class WorkloadCommand
     // Applies the Locking/IsolationLevel/Timeout keys, defaulting to optimistic + serializable and a
     // command timeout wide enough for a batched commit. A flag value always wins; the default only fills
     // in a key the connection string doesn't already carry.
-    private static string ApplyWorkloadDefaults(string connectionString, string? locking, string? isolation, string? user, string? password, bool noPrepare)
+    private static string ApplyWorkloadDefaults(string connectionString, string? locking, string? isolation, string? user, string? password, bool noPrepare, bool allowInsecureCredentials)
     {
         connectionString = ApplyKey(connectionString, "Locking", locking, defaultValue: "Optimistic");
         connectionString = ApplyKey(connectionString, "IsolationLevel", isolation, defaultValue: "Serializable");
@@ -353,6 +396,11 @@ internal static class WorkloadCommand
 
         if (!string.IsNullOrEmpty(password))
             connectionString = WithKey(connectionString, "Password", password);
+
+        // --allow-insecure-credentials waives the driver's refusal to carry credentials to a
+        // plaintext endpoint that is not loopback. A -c that already sets the key keeps its value.
+        if (allowInsecureCredentials && !HasKey(connectionString, "AllowInsecureCredentials"))
+            connectionString = WithKey(connectionString, "AllowInsecureCredentials", "true");
 
         return connectionString;
     }
@@ -387,5 +435,7 @@ internal record WorkloadArgs(
     string? User = null,
     string? Password = null,
     bool NoPrepare = false,
-    bool PasswordFromFlag = false
+    bool PasswordFromFlag = false,
+    bool PromptPassword = false,
+    bool AllowInsecureCredentials = false
 );

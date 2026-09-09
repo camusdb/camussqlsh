@@ -12,16 +12,13 @@ internal static class ConnectionHelper
 {
     internal static void Validate(string connectionString)
     {
-        Dictionary<string, string> values = connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(part => part.Split('=', 2, StringSplitOptions.TrimEntries))
-            .Where(parts => parts.Length == 2)
-            .GroupBy(parts => parts[0], StringComparer.InvariantCultureIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.Last()[1], StringComparer.InvariantCultureIgnoreCase);
+        // Read through the same quote-aware parser the driver uses, so a quoted value carrying a
+        // ';' — a password, or a RoutingNodes map — is one value here too.
+        string? endpoint = SqlKind.GetConnValue(connectionString, "Endpoint");
 
         // Endpoint accepts a comma-separated pool of nodes, which the driver round-robins over, so
         // each member is validated on its own. The whole value is not a URI.
-        string[] endpoints = values.TryGetValue("Endpoint", out string? endpoint)
+        string[] endpoints = endpoint is not null
             ? endpoint.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             : [];
 

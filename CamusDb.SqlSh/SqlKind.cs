@@ -228,11 +228,7 @@ internal static class SqlKind
 
     internal static bool HasDatabase(string connectionString)
     {
-        return connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-            .Where(p => p.Length == 2 && string.Equals(p[0], "Database", StringComparison.OrdinalIgnoreCase))
-            .Any(p => !string.IsNullOrWhiteSpace(p[1]));
+        return !string.IsNullOrWhiteSpace(GetConnValue(connectionString, "Database"));
     }
 
     internal static bool IsSystemLevelQuery(string sql)
@@ -412,52 +408,152 @@ internal static class SqlKind
     }
 
     // Returns the connection string with key=value set, replacing any existing occurrence of the key.
+    // The key is removed wherever it appears, because the driver refuses a connection string that
+    // sets the same key twice rather than letting one spelling win silently.
     internal static string WithKey(string connectionString, string key, string value)
     {
-        EnsureValueCarriable(key, value);
+        List<string> parts = [];
 
-        List<string> parts = connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(p => !p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase))
-            .ToList();
+        foreach (Setting setting in EnumerateSettings(connectionString))
+        {
+            if (!string.Equals(setting.Key, key, StringComparison.OrdinalIgnoreCase))
+                parts.Add(setting.Raw);
+        }
 
-        parts.Add($"{key}={value}");
+        parts.Add($"{key}={FormatValue(value)}");
         return string.Join(';', parts);
     }
 
-    // The driver parses connection strings by splitting on ';' and has no quoting or escaping for
-    // values, so a ';' inside a value would terminate it early — and a value like
-    // `x;Endpoint=http://evil:5096` would hijack every key after it, credentials included.
-    // Refuse rather than corrupt or redirect: the error names the offending key so the fix is
-    // obvious (for credentials: pass -u and let the shell prompt, or set CAMUS_PASSWORD).
-    private static void EnsureValueCarriable(string key, string value)
+    // Writes a value the way the driver reads it back. A value that carries a ';', that begins or
+    // ends with a space, or that starts with a quote character is wrapped in single quotes, and a
+    // single quote inside it is doubled. Everything else is written bare, so the common connection
+    // string keeps the shape a user recognizes.
+    internal static string FormatValue(string value)
     {
-        if (value.Contains(';'))
-        {
-            throw new ArgumentException(
-                $"The value for '{key}' contains ';' (0x3B), which a CamusDB connection string cannot carry: " +
-                "values can be neither quoted nor escaped. Remove the ';' (for a password, log in with -u and let " +
-                "the shell prompt, or set CAMUS_PASSWORD).",
-                nameof(value));
-        }
+        bool needsQuotes = value.Contains(';', StringComparison.Ordinal) ||
+            value != value.Trim() ||
+            (value.Length > 0 && (value[0] == '\'' || value[0] == '"'));
+
+        if (!needsQuotes)
+            return value;
+
+        return string.Concat("'", value.Replace("'", "''", StringComparison.Ordinal), "'");
     }
 
     internal static bool HasKey(string connectionString, string key)
     {
-        return connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Any(p => p.StartsWith(key + "=", StringComparison.OrdinalIgnoreCase));
+        foreach (Setting setting in EnumerateSettings(connectionString))
+        {
+            if (string.Equals(setting.Key, key, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
-    // Returns the value of a connection-string key, or null when the key is absent.
+    // Returns the value of a connection-string key, or null when the key is absent. The value comes
+    // back unquoted, so it compares against a plain string the way the driver's own does.
     internal static string? GetConnValue(string connectionString, string key)
     {
-        return connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(p => p.Split('=', 2, StringSplitOptions.TrimEntries))
-            .Where(p => p.Length == 2 && string.Equals(p[0], key, StringComparison.OrdinalIgnoreCase))
-            .Select(p => p[1])
-            .FirstOrDefault();
+        foreach (Setting setting in EnumerateSettings(connectionString))
+        {
+            if (string.Equals(setting.Key, key, StringComparison.OrdinalIgnoreCase))
+                return setting.Value;
+        }
+
+        return null;
+    }
+
+    // One parsed key/value pair, together with the text it was written as. WithKey re-emits Raw for
+    // every key it keeps, so a connection string the user typed is edited, never reformatted. A
+    // segment that sets nothing has no Setting, so an edit drops it — which is what the driver
+    // does with it in any case.
+    private readonly record struct Setting(string Key, string Value, string Raw);
+
+    // Splits a connection string exactly as CamusDB.Client 0.12 does, so the shell reads back what
+    // the driver will read. A key ends at the first '=' or ';'. A value is quoted only when a single
+    // or double quote is its first non-blank character; that value then runs to the matching close,
+    // where a doubled quote character is one literal quote. Every other value ends at the next ';'
+    // and is trimmed. A segment with no '=' sets nothing and is skipped, as the driver skips it.
+    //
+    // An unclosed quoted value ends at the end of the string here. The driver rejects it with a
+    // message that names the problem, and that message is the one the user should see.
+    private static IEnumerable<Setting> EnumerateSettings(string connectionString)
+    {
+        int position = 0;
+
+        while (position < connectionString.Length)
+        {
+            int segmentStart = position;
+
+            while (position < connectionString.Length && connectionString[position] != '=' && connectionString[position] != ';')
+                position++;
+
+            if (position >= connectionString.Length || connectionString[position] == ';')
+            {
+                position++;
+                continue;
+            }
+
+            string key = connectionString[segmentStart..position].Trim();
+            position++; // past the '='
+
+            while (position < connectionString.Length && connectionString[position] is ' ' or '\t')
+                position++;
+
+            string value;
+
+            if (position < connectionString.Length && connectionString[position] is '\'' or '"')
+            {
+                char quote = connectionString[position];
+                position++;
+
+                int valueStart = position;
+
+                while (position < connectionString.Length)
+                {
+                    if (connectionString[position] != quote)
+                    {
+                        position++;
+                        continue;
+                    }
+
+                    // A doubled quote is one literal quote, not the end of the value.
+                    if (position + 1 < connectionString.Length && connectionString[position + 1] == quote)
+                    {
+                        position += 2;
+                        continue;
+                    }
+
+                    break;
+                }
+
+                value = connectionString[valueStart..position]
+                    .Replace(new string(quote, 2), quote.ToString(), StringComparison.Ordinal);
+
+                if (position < connectionString.Length)
+                    position++; // past the closing quote
+
+                // Anything between the closing quote and the ';' is whitespace or a typo.
+                while (position < connectionString.Length && connectionString[position] != ';')
+                    position++;
+            }
+            else
+            {
+                int valueStart = position;
+
+                while (position < connectionString.Length && connectionString[position] != ';')
+                    position++;
+
+                value = connectionString[valueStart..position].Trim();
+            }
+
+            string raw = connectionString[segmentStart..position];
+            position++; // past the ';'
+
+            if (key.Length > 0)
+                yield return new Setting(key, value, raw);
+        }
     }
 
     // Produces a connection string for the same endpoint/transport but with no database selected,
@@ -470,22 +566,17 @@ internal static class SqlKind
 
     internal static string SwapDatabase(string connectionString, string newDatabase)
     {
-        EnsureValueCarriable("Database", newDatabase);
-
-        List<string> parts = connectionString
-            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Where(p => !p.StartsWith("Database=", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        parts.Add($"Database={newDatabase}");
-        return string.Join(';', parts);
+        return WithKey(connectionString, "Database", newDatabase);
     }
 
     // True when this connection string would put credentials on the wire in cleartext: a User,
     // Password or AccessToken key is present, and an http:// Endpoint (or BackupEndpoint) names a
-    // host other than this machine. Whether TLS is actually enforced is the server's decision and
-    // can be turned off, so this client-side check is the only notice the user gets before a
-    // misconfigured server receives the password in the clear.
+    // host other than this machine.
+    //
+    // The driver refuses that combination outright (CADB0519), so this reports the one case that
+    // still reaches the wire: a connection string that waives the refusal with
+    // AllowInsecureCredentials=true. The waiver is for a link that protects the traffic some other
+    // way, which nothing here can verify, so the shell names what is happening and connects.
     internal static bool SendsCredentialsCleartext(string connectionString)
     {
         bool hasCredentials =
