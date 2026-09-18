@@ -791,50 +791,12 @@ runbook step rather than something the shell can drive to completion. See the se
 
 ## Syntax Coloring
 
-The interactive editor colors SQL keywords, shell commands, constants, numbers, quoted strings, and supported function names.
+The interactive editor colors SQL keywords, shell commands, constants, numbers, quoted strings,
+and supported function names. Each group gets its own color.
 
-Colored SQL keywords include:
-
-```text
-select update from where order by asc desc describe database table set create if exists default
-primary key index indexes constraint limit insert into values delete alter rename column drop
-null not string int64 float64 object_id oid bool boolean is on in or and between like ilike add
-show use tables view views materialized refresh concurrently cascade owner no data columns group
-join inner offset unique having explain analyze begin start transaction commit rollback as
-distinct cast integer double engine stats statistics for variables cluster setting settings reset
-truncate ranges range row slow queries
-```
-
-Colored shell commands:
-
-```text
-clear source use exit quit backup
-```
-
-Colored constants:
-
-```text
-true false
-```
-
-Colored aggregate functions:
-
-```text
-count max min avg sum
-```
-
-Colored scalar functions and aliases:
-
-```text
-gen_id
-current_database current_user current_role is_superuser
-current_timestamp now current_date date_add date_diff date_part date_trunc unix_timestamp from_unixtime
-abs ceil ceiling floor sqrt pow power mod sign random round
-length lower upper trim ltrim rtrim substring replace contains starts_with ends_with concat
-json_valid json_type json_extract json_value json_contains json_array_length
-to_string to_int64 to_float64 to_bool to_id str_id
-octet_length vector_dims l2_distance inner_product cosine_distance
-```
+The word lists follow the server's grammar, so every word a statement gives a meaning is colored.
+Some of those words are plain identifiers to the parser rather than reserved keywords, so they stay
+usable as table and column names; the editor colors them because they read as part of a statement.
 
 ## Autocompletion
 

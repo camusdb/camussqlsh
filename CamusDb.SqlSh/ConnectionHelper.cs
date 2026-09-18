@@ -28,24 +28,24 @@ internal static class ConnectionHelper
         }
     }
 
+    /// <summary>
+    /// Copies the reader's current row into a dictionary keyed by column name.
+    ///
+    /// <para>Each cell is taken as the driver holds it, so every one of the twelve
+    /// <see cref="ColumnType"/> members arrives with its own backing field. A per-type rebuild
+    /// through the reader's typed accessors cannot do that: it has no branch for
+    /// <see cref="ColumnType.Bytes"/>, <see cref="ColumnType.Date"/>,
+    /// <see cref="ColumnType.DateTime"/>, <see cref="ColumnType.Float32"/> or
+    /// <see cref="ColumnType.Array"/>, so each of those reached the display as the text
+    /// <c>GetString</c> makes of it — <c>System.Byte[]</c> for a bytes column.</para>
+    /// </summary>
     internal static Dictionary<string, ColumnValue> ReadCurrentRow(CamusDataReader reader)
     {
         Dictionary<string, ColumnValue> row = new(reader.FieldCount);
+
         for (int i = 0; i < reader.FieldCount; i++)
-        {
-            ColumnValue cv = reader.IsDBNull(i)
-                ? new ColumnValue { Type = ColumnType.Null }
-                : reader.GetDataTypeName(i) switch
-                {
-                    "Id" => new ColumnValue { Type = ColumnType.Id, StrValue = reader.GetString(i) },
-                    "Integer64" => new ColumnValue { Type = ColumnType.Integer64, LongValue = reader.GetInt64(i) },
-                    "Bool" => new ColumnValue { Type = ColumnType.Bool, BoolValue = reader.GetBoolean(i) },
-                    "Float64" => new ColumnValue { Type = ColumnType.Float64, FloatValue = (float)reader.GetDouble(i) },
-                    "Uuid" => new ColumnValue { Type = ColumnType.Uuid, UuidValue = reader.GetGuid(i).ToString() },
-                    _ => new ColumnValue { Type = ColumnType.String, StrValue = reader.GetString(i) }
-                };
-            row[reader.GetName(i)] = cv;
-        }
+            row[reader.GetName(i)] = reader.GetColumnValue(i);
+
         return row;
     }
 

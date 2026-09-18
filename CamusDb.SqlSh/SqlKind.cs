@@ -250,7 +250,12 @@ internal static class SqlKind
                StartsWithWords(trimmedSql, "show", "slow", "queries") ||
                // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
                // it runs on the endpoint connection and answers in a session that never ran `use`.
-               StartsWithWords(trimmedSql, "show", "cluster", "settings");
+               StartsWithWords(trimmedSql, "show", "cluster", "settings") ||
+               // The auth catalog's account list. It reads the shared auth keyspace rather than any
+               // database, so it runs on the endpoint connection, exactly as SHOW GRANTS does. USERS is
+               // a plain identifier to the parser rather than a keyword, so the two-word prefix is
+               // matched by words: the single-space StartsWith spelling would miss `SHOW  USERS`.
+               StartsWithWords(trimmedSql, "show", "users");
     }
 
     // User and grant administration is server-level: like database DDL, these statements name their
@@ -264,7 +269,13 @@ internal static class SqlKind
                trimmedSql.StartsWith("alter user ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("drop user ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("grant ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("revoke ", StringComparison.InvariantCultureIgnoreCase);
+               trimmedSql.StartsWith("revoke ", StringComparison.InvariantCultureIgnoreCase) ||
+               // The two flushes act on that same server-level auth keyspace and on this node's own
+               // caches. They name no database and return no descriptor, so they run on a
+               // database-less connection. FLUSH and SESSIONS are plain identifiers to the parser
+               // rather than keywords, so both prefixes are matched by words.
+               StartsWithWords(trimmedSql, "flush", "privileges") ||
+               StartsWithWords(trimmedSql, "flush", "sessions");
     }
 
     // Everything the server dispatches before opening a database — database lifecycle DDL, user and

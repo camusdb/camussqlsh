@@ -345,6 +345,10 @@ if (richEditorSupported)
         "relink",
         "orphan",
         "include",
+        // SHOW CREATE TABLE <table> WITHOUT INDEXES prints the table with no CREATE INDEX
+        // statements after it. The PRIMARY KEY is always printed, because it is part of the
+        // table definition.
+        "without",
         "null",
         "not",
         "string",
@@ -390,6 +394,10 @@ if (richEditorSupported)
         "having",
         "explain",
         "analyze",
+        // EXPLAIN (LOGICAL) and EXPLAIN (PHYSICAL) choose which plan the server prints. Both
+        // words are plain identifiers to the parser, so both stay usable as names.
+        "logical",
+        "physical",
         "begin",
         "start",
         "transaction",
@@ -397,6 +405,10 @@ if (richEditorSupported)
         "rollback",
         "evict",
         "cache",
+        // Options of the {cache=<name>, ttl=<value><unit>, strict} table hint. Both words are
+        // plain identifiers to the parser and stay usable as names.
+        "ttl",
+        "strict",
         "comment",
         "as",
         // AS OF SYSTEM TIME is lexed as one token by the server, but the editor highlights
@@ -429,6 +441,15 @@ if (richEditorSupported)
         "locking",
         "optimistic",
         "pessimistic",
+        // SET TRANSACTION PRIORITY <value>: how the scheduler ranks this transaction against
+        // others. PRIORITY and each value are plain identifiers to the parser, so all six words
+        // stay usable as names. They are colored like LOCKING and its two modes above.
+        "priority",
+        "background",
+        "low",
+        "normal",
+        "high",
+        "critical",
         "user",
         "identified",
         "with",
@@ -439,6 +460,12 @@ if (richEditorSupported)
         "all",
         "for",
         "sha256_password",
+        // FLUSH PRIVILEGES drops this node's cached grants. FLUSH SESSIONS ends every session.
+        // SHOW USERS lists the accounts. FLUSH, SESSIONS and USERS are plain identifiers to the
+        // parser, so all three stay usable as names. A table named users is common in a schema.
+        "flush",
+        "sessions",
+        "users",
         "engine",
         "stats",
         "variables",
@@ -469,6 +496,9 @@ if (richEditorSupported)
         "materialized",
         "refresh",
         "cascade",
+        // DROP VIEW <view> RESTRICT is the default: the drop fails when another view reads it.
+        // RESTRICT is a plain identifier to the parser, exactly like CASCADE beside it.
+        "restrict",
         "option",
         "local",
         "cascaded",
@@ -476,6 +506,17 @@ if (richEditorSupported)
         "data",
         "concurrently",
         "owner",
+        // Large-value column storage. ALTER TABLE <t> ALTER [COLUMN] <c> SET STORAGE <strategy>
+        // picks the form of future writes, and ALTER TABLE <t> REWRITE STORAGE [INLINE] converts
+        // the rows that already exist. A strategy is one of PLAIN, MAIN, EXTERNAL or EXTENDED.
+        // Every word here is a plain identifier to the parser and stays usable as a name.
+        "storage",
+        "rewrite",
+        "inline",
+        "plain",
+        "main",
+        "external",
+        "extended",
     ];
 
     string[] functions = [
@@ -1669,18 +1710,67 @@ static void WriteErrorCaret(string? sql, string message)
     AnsiConsole.MarkupLine("  [red]{0}^[/]", pad.ToString());
 }
 
+// The display text of one cell, escaped for Spectre markup. Every ColumnType the driver can
+// return has a branch, so a value never falls through to the text of its CLR type.
 static string FormatValue(ColumnValue value)
 {
     return value.Type switch
     {
         ColumnType.Id => !string.IsNullOrEmpty(value.StrValue) ? value.StrValue! : "",
         ColumnType.String => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!) : "",
-        ColumnType.Integer64 => value.LongValue.ToString(),
-        ColumnType.Float64 => value.FloatValue.ToString(CultureInfo.InvariantCulture),
+        ColumnType.Integer64 => value.LongValue.ToString(CultureInfo.InvariantCulture),
+        ColumnType.Float64 or ColumnType.Float32 => value.FloatValue.ToString(CultureInfo.InvariantCulture),
         ColumnType.Bool => value.BoolValue.ToString(),
-        ColumnType.Uuid => !string.IsNullOrEmpty(value.UuidValue) ? value.UuidValue! : "",
+        ColumnType.Uuid => FormatUuid(value),
+        // The server sends a date as yyyy-MM-dd and a datetime in round-trip form, and that text is
+        // what the parser reads back. LongValue holds the same instant in UTC ticks, so an older
+        // server that omits the text is still rendered rather than dropped.
+        ColumnType.Date => value.IsoValue ?? new DateTime(value.LongValue, DateTimeKind.Utc).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+        ColumnType.DateTime => value.IsoValue ?? new DateTime(value.LongValue, DateTimeKind.Utc).ToString("o", CultureInfo.InvariantCulture),
+        ColumnType.Bytes => FormatBytesLiteral(value.BytesValue),
+        ColumnType.Array => FormatArray(value.ArrayValues),
         _ => "null"
     };
+}
+
+// The canonical string form the server sends, or the one rebuilt from the two 64-bit halves when
+// the reply carries only those.
+static string FormatUuid(ColumnValue value)
+{
+    if (!string.IsNullOrEmpty(value.UuidValue))
+        return value.UuidValue!;
+
+    return value.AsGuid().ToString("D");
+}
+
+// A bytes value as the x'…' literal the parser accepts, so a cell can be copied back into a
+// statement. A long value is clipped and its true length is named: a blob or an embedding runs to
+// megabytes, and the whole hex string would fill the terminal and slow the table down.
+static string FormatBytesLiteral(byte[]? bytes)
+{
+    if (bytes is null || bytes.Length == 0)
+        return "x''";
+
+    const int MaxShown = 32;
+
+    string hex = Convert.ToHexStringLower(bytes, 0, Math.Min(bytes.Length, MaxShown));
+
+    return bytes.Length <= MaxShown
+        ? string.Concat("x'", hex, "'")
+        : string.Format(CultureInfo.InvariantCulture, "x'{0}…' ({1} bytes)", hex, bytes.Length);
+}
+
+// An array value as [a, b, c]. Each element goes through FormatValue, so a string element is
+// escaped and a nested value is rendered by its own type.
+//
+// The brackets are doubled because this text is markup: a Spectre table cell and the vertical
+// writer both read one, and a single '[' opens a style tag there.
+static string FormatArray(List<ColumnValue>? elements)
+{
+    if (elements is null || elements.Count == 0)
+        return "[[]]";
+
+    return string.Concat("[[", string.Join(", ", elements.Select(element => FormatValue(element))), "]]");
 }
 
 static void WriteVerticalRow(Dictionary<string, ColumnValue> row, int rowNumber)
