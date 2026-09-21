@@ -27,7 +27,7 @@ string version = informationalVersion?.Split('+')[0]
     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
     ?? "unknown";
 
-Console.WriteLine($"CamusDB SQL Shell {version} (alpha)\n");
+Console.WriteLine($"CamusDB SQL Shell {version}\n");
 
 int workloadIdx = Array.FindIndex(args, a => string.Equals(a, "workload", StringComparison.OrdinalIgnoreCase));
 if (workloadIdx >= 0)

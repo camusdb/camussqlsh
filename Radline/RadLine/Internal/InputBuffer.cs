@@ -23,7 +23,13 @@ namespace RadLine
         private bool _inPaste;
         private bool _lastPasteCarriageReturn;
 
-        private enum MarkerMatch { None, Partial, StartComplete, EndComplete }
+        private enum MarkerMatch
+        {
+            None,
+            Partial,
+            StartComplete,
+            EndComplete,
+        }
 
         public InputBuffer(IInputSource source)
         {
@@ -162,6 +168,7 @@ namespace RadLine
                         {
                             EmitProcessed(buffate);
                         }
+
                         return;
                 }
             }
