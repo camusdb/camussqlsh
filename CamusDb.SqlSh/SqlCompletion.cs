@@ -19,7 +19,9 @@ using RadLine;
 /// loaded lazily via "show tables" / "show views" / "show materialized views" and
 /// refreshed whenever the active database changes. Configuration keys are cached the
 /// same way, from "show variables", for the cluster-settings statements, and index names
-/// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES.
+/// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES. Sequence
+/// names are loaded from "show sequences" with the relation names and offered after
+/// SEQUENCE (ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE).
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
@@ -55,6 +57,7 @@ internal sealed class SqlCompletion : ITextCompletion
 
     private readonly string[] _staticWords;
     private volatile string[] _tables = [];
+    private volatile string[] _sequences = [];
     private volatile string[] _settings = [];
 
     // The connection the table cache was loaded over, kept so an index list can be fetched later,
@@ -82,6 +85,9 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsIndexContext(prefix))
             return IndexCompletions(word);
 
+        if (IsSequenceContext(prefix) && _sequences.Length > 0)
+            return _sequences;
+
         if (IsTableContext(prefix) && _tables.Length > 0)
             return _tables;
 
@@ -103,6 +109,14 @@ internal sealed class SqlCompletion : ITextCompletion
         // of SHOW STATISTICS FOR TABLE <table> already lands in the branch above.
         return string.Equals(lastToken, "for", StringComparison.OrdinalIgnoreCase) &&
                string.Equals(TokenFromEnd(prefix, 1), "statistics", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // The name after SEQUENCE: ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE all name one that
+    // exists. CREATE SEQUENCE names one that does not exist yet, so nothing is offered there.
+    private static bool IsSequenceContext(string prefix)
+    {
+        return string.Equals(LastToken(prefix), "sequence", StringComparison.OrdinalIgnoreCase) &&
+               !string.Equals(TokenFromEnd(prefix, 1), "create", StringComparison.OrdinalIgnoreCase);
     }
 
     // The INDEX of SHOW RANGES FROM INDEX <table>@<index>. INDEX alone is not enough — CREATE INDEX
@@ -246,7 +260,7 @@ internal sealed class SqlCompletion : ITextCompletion
     }
 
     /// <summary>
-    /// Loads the table and view names for the active database into the completion cache.
+    /// Loads the table, view and sequence names for the active database into the completion cache.
     /// Each command fails independently (no database selected, connection issues, a server
     /// that predates views), so completion degrades gracefully to whatever could be loaded,
     /// and ultimately to the static vocabulary.
@@ -264,12 +278,24 @@ internal sealed class SqlCompletion : ITextCompletion
         loadedAny |= await LoadNamesAsync(connection, "show views", names);
         loadedAny |= await LoadNamesAsync(connection, "show materialized views", names);
 
-        if (!loadedAny)
-            return; // Keep whatever we had; completion falls back to keywords.
+        if (loadedAny)
+        {
+            _tables = names.Distinct(StringComparer.OrdinalIgnoreCase)
+                           .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                           .ToArray();
+        }
 
-        _tables = names.Distinct(StringComparer.OrdinalIgnoreCase)
-                       .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                       .ToArray();
+        // Loaded on its own, so a server that predates sequences still completes relation names.
+        // The name is asked for by column: SHOW SEQUENCES carries the counter's position and
+        // options beside it.
+        List<string> sequences = new();
+
+        if (await LoadNamesAsync(connection, "show sequences", sequences, "sequence"))
+        {
+            _sequences = sequences.Distinct(StringComparer.OrdinalIgnoreCase)
+                                  .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                                  .ToArray();
+        }
     }
 
     /// <summary>

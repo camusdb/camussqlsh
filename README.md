@@ -825,13 +825,19 @@ show statistics for ⇥          -- cycles through all table names
 show ranges from table ⇥       -- cycles through all table names
 show ranges from index us⇥     -- completes the table half, such as "users"
 show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
+drop sequence ⇥               -- cycles through all sequence names
 sel⇥                           -- completes to "select"
 ```
 
+After `sequence`, the shell suggests the **sequence names** of the current database. This applies
+to `alter sequence`, `drop sequence`, `show create sequence` and `comment on sequence`. After
+`create sequence`, the shell suggests nothing, because that statement names a new sequence.
+
 Relation names are loaded from `show tables`, `show views` and `show materialized views`,
-and refreshed automatically on startup, after a `use <database>` switch, and after a
-statement that changes the set of relations (`create`/`drop table`, `create [or
-replace]`/`drop`/`alter view`, and their materialized forms). Each of those refreshes also
+and sequence names from `show sequences`. They are refreshed automatically on startup, after a
+`use <database>` switch, and after a statement that changes the set of relations or sequences
+(`create`/`drop table`, `create [or replace]`/`drop`/`alter view`, their materialized forms,
+and `create`/`drop`/`alter`/`comment on sequence`). Each of those refreshes also
 drops the cached index names, because an index belongs to one table in one database. Index DDL
 (`create [unique] index`, `drop index`, `alter table`) drops them on its own.
 
@@ -884,6 +890,25 @@ Casting:
 select cast(score as integer) from scores;
 select to_string(score), to_int64(score), to_float64(score), to_bool(active), to_id(id_text) from scores;
 ```
+
+Sequences:
+
+```sql
+create sequence order_no start with 1000 cache 1;
+create table orders (id oid primary key, no int64 default(nextval('order_no')), total float64);
+create table tickets (id oid primary key, n int64 generated always as identity, subject string);
+select nextval('order_no'), currval('order_no'), lastval();
+select setval('order_no', 5000);
+alter sequence order_no restart with 500;
+show sequences like 'order%';
+truncate table tickets restart identity;
+```
+
+`currval` and `lastval` report the last value that **this transaction** drew. Outside a
+transaction, each statement is its own transaction, so run the `nextval` and the `currval` in
+one `begin`/`commit` block. A `setval` and an `alter sequence … restart` take about five seconds,
+because the server waits for one storage lease before it reports success. The shell waits up to
+60 seconds for a statement, so this delay does not cause a timeout.
 
 Vectors:
 

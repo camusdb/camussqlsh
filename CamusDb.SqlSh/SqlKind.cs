@@ -366,7 +366,22 @@ internal static class SqlKind
     
         return trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
-               IsViewDDL(trimmedSql);
+               IsViewDDL(trimmedSql) ||
+               // A sequence shares one namespace with tables and views, and the completion cache holds
+               // sequence names for the SEQUENCE position, so its DDL refreshes the cache too.
+               IsSequenceDDL(trimmedSql);
+    }
+
+    // Sequence DDL. The server dispatches all of these as DDL: each one commits a replicated schema
+    // change, even ALTER SEQUENCE … RENAME and COMMENT ON SEQUENCE, which only touch metadata.
+    // The prefixes are matched by words, so `DROP  SEQUENCE` still matches and `CREATE SEQUENCES`
+    // does not.
+    internal static bool IsSequenceDDL(string sql)
+    {
+        return StartsWithWords(sql, "create", "sequence") ||
+               StartsWithWords(sql, "drop", "sequence") ||
+               StartsWithWords(sql, "alter", "sequence") ||
+               StartsWithWords(sql, "comment", "on", "sequence");
     }
 
     // View and materialized-view DDL. CREATE OR REPLACE and ALTER … RENAME change what a name
@@ -392,6 +407,7 @@ internal static class SqlKind
     
         return IsServerLevelDDL(trimmedSql) ||
                IsViewDDL(trimmedSql) ||
+               IsSequenceDDL(trimmedSql) ||
                trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||

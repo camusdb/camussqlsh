@@ -517,6 +517,24 @@ if (richEditorSupported)
         "main",
         "external",
         "extended",
+        // Sequences. SEQUENCE and SEQUENCES are reserved words to the parser, like VIEW and VIEWS.
+        // Every option word of CREATE/ALTER SEQUENCE, of TRUNCATE … RESTART|CONTINUE IDENTITY, and
+        // of an identity column (GENERATED ALWAYS|BY DEFAULT AS IDENTITY, SERIAL, BIGSERIAL) is a
+        // plain identifier to the parser and stays usable as a name. START, WITH, BY, CACHE, NO,
+        // RENAME and TO are listed above for other statements.
+        "sequence",
+        "sequences",
+        "increment",
+        "minvalue",
+        "maxvalue",
+        "cycle",
+        "restart",
+        "continue",
+        "identity",
+        "generated",
+        "always",
+        "serial",
+        "bigserial",
     ];
 
     string[] functions = [
@@ -602,6 +620,12 @@ if (richEditorSupported)
         "l2_distance",
         "inner_product",
         "cosine_distance",
+        // Sequence functions. nextval and setval move a counter; currval and lastval report the
+        // last value this transaction drew.
+        "nextval",
+        "currval",
+        "lastval",
+        "setval",
     ];
 
     string[] commands = [
