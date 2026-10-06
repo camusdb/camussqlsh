@@ -218,6 +218,16 @@ internal static class SqlKind
                trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
     }
 
+    // Every INSERT goes through a reader, so an INSERT … RETURNING can show its rows. The server
+    // decides the shape of the result: a reader with columns for a RETURNING list, and a bare
+    // affected-row count for any other INSERT. Thus the shell does not look for the RETURNING
+    // keyword itself, and a `returning` inside a string, a comment or a backtick-quoted name cannot
+    // confuse it.
+    internal static bool IsInsert(string sql)
+    {
+        return StartsWithWords(sql, "insert");
+    }
+
     // Collapses a statement onto one line for display, clipping anything past `max` characters.
     internal static string Abbreviate(string sql, int max = 90)
     {

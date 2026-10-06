@@ -871,6 +871,10 @@ internal sealed class CamusTui
                 _transaction = null;
             }
         }
+        else if (IsInsert(sql))
+        {
+            log.Add(await InsertAsync(sql, token));
+        }
         else
         {
             await using CamusCommand cmd = _connection.CreateCamusCommand(sql);
@@ -939,6 +943,40 @@ internal sealed class CamusTui
         return _pageDone
             ? $"{_rows.Count} rows in {stopwatch.Elapsed}"
             : $"{got} rows so far (first in {first}) — scroll for more";
+    }
+
+    // An INSERT runs through a reader, so an INSERT … RETURNING can show its rows in the grid. The
+    // server sends a reader with columns only for a RETURNING list. Any other INSERT leaves the grid
+    // as it is and logs the count, as before. The RETURNING rows are already in memory on the client,
+    // so they are read now and the reader closes at once.
+    private async Task<string> InsertAsync(string sql, CancellationToken token)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        await using CamusCommand cmd = _connection.CreateCamusCommand(sql);
+        cmd.CommandTimeout = 60;
+        cmd.Transaction = _transaction;
+
+        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        int affected = reader.RecordsAffected;
+
+        if (reader.FieldCount == 0)
+            return $"{affected} rows affected ({stopwatch.Elapsed})";
+
+        await ClosePageAsync();
+
+        _pageReader = reader;
+        _pageDone = false;
+
+        _headers = [];
+        _rows.Clear();
+        _rowTop = 0;
+        _colLeft = 0;
+
+        // The display cap still applies, so the grid can show fewer rows than the count.
+        await FetchAsync(int.MaxValue, token);
+
+        return $"{affected} rows affected ({stopwatch.Elapsed})";
     }
 
     // Pulls up to `count` more rows off the open reader. Returns how many arrived.

@@ -333,6 +333,9 @@ if (richEditorSupported)
         "insert",
         "into",
         "values",
+        // INSERT … RETURNING <list>: a reserved word to the parser, so a column or a table called
+        // returning needs backticks.
+        "returning",
         "delete",
         "alter",
         "rename",
@@ -535,9 +538,6 @@ if (richEditorSupported)
         "always",
         "serial",
         "bigserial",
-    ];
-
-    string[] functions = [
         // Foreign keys: REFERENCES <table> [(cols)], FOREIGN KEY (cols) REFERENCES …, ON DELETE|UPDATE
         // NO ACTION|RESTRICT|CASCADE|SET NULL|SET DEFAULT, MATCH SIMPLE|FULL|PARTIAL, [NOT] DEFERRABLE
         // and INITIALLY IMMEDIATE|DEFERRED. REFERENCES, FOREIGN, DEFERRABLE and INITIALLY are
@@ -557,6 +557,9 @@ if (richEditorSupported)
         "initially",
         "immediate",
         "deferred",
+    ];
+
+    string[] functions = [
         "count",
         "max",
         "min",
@@ -1145,6 +1148,8 @@ async Task ExecuteStatement(string sql, bool vertical)
         await ExecuteCommitTx(connection);
     else if (IsRollbackTx(sql))
         await ExecuteRollbackTx(connection);
+    else if (IsInsert(sql))
+        await ExecuteInsert(connection, sql, vertical);
     else
         await ExecuteNonQuery(connection, sql);
 }
@@ -1233,12 +1238,15 @@ async Task ExecuteNonQuery(CamusConnection connection, string sql)
 
     int affected = await cmd.ExecuteNonQueryAsync();
 
-    if (affected == 1)
-        AnsiConsole.MarkupLine("Query OK, [blue]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
-    else if (affected > 1)
-        AnsiConsole.MarkupLine("Query OK, [blue]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
+    WriteAffectedRows(affected, stopwatch.Elapsed);
+}
+
+static void WriteAffectedRows(int affected, TimeSpan elapsed)
+{
+    if (affected > 0)
+        AnsiConsole.MarkupLine("Query OK, [blue]{0}[/] rows affected ({1})\n", affected, elapsed);
     else
-        AnsiConsole.MarkupLine("Query OK, [yellow]{0}[/] rows affected ({1})\n", affected, stopwatch.Elapsed);
+        AnsiConsole.MarkupLine("Query OK, [yellow]{0}[/] rows affected ({1})\n", affected, elapsed);
 }
 
 async Task ExecuteBeginTx(CamusConnection connection)
@@ -1317,14 +1325,46 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
     cmd.CommandTimeout = 60;
     cmd.Transaction = transaction;
 
-    int rows = 0;
-    Table? table = null;
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    CamusDataReader reader = await cmd.ExecuteReaderAsync();
+
+    TimeSpan duration = stopwatch.Elapsed;
+
+    int rows = await WriteRows(reader, vertical);
+
+    AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+}
+
+// Runs an INSERT through a reader rather than ExecuteNonQueryAsync, which asks the server to drop
+// the rows of a RETURNING list and keep only the count. The server decides the shape: a RETURNING
+// list gives a reader with columns, and any other INSERT gives a reader with no columns. Either way
+// RecordsAffected is the inserted-row count, so the footer reads the same as for a plain INSERT.
+async Task ExecuteInsert(CamusConnection connection, string sql, bool vertical)
+{
+    await using CamusCommand cmd = connection.CreateCamusCommand(sql);
+
+    cmd.CommandTimeout = 60;
+    cmd.Transaction = transaction;
 
     Stopwatch stopwatch = Stopwatch.StartNew();
 
     CamusDataReader reader = await cmd.ExecuteReaderAsync();
 
     TimeSpan duration = stopwatch.Elapsed;
+
+    if (reader.FieldCount > 0)
+        await WriteRows(reader, vertical);
+
+    WriteAffectedRows(reader.RecordsAffected, duration);
+}
+
+// Writes every row of `reader` as one table, or as one vertical block per row for \G, and returns
+// the row count. Writes nothing when the reader has no rows.
+async Task<int> WriteRows(CamusDataReader reader, bool vertical)
+{
+    int rows = 0;
+    Table? table = null;
 
     while (await reader.ReadAsync())
     {
@@ -1365,7 +1405,7 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
     if (table is not null)
         AnsiConsole.Write(table);
 
-    AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+    return rows;
 }
 
 // Runs one `backup …` subcommand against the node's backup admin API. A usage mistake is reported and

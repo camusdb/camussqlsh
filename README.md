@@ -913,6 +913,25 @@ one `begin`/`commit` block. A `setval` and an `alter sequence … restart` take 
 because the server waits for one storage lease before it reports success. The shell waits up to
 60 seconds for a statement, so this delay does not cause a timeout.
 
+Insert … returning:
+
+```sql
+insert into orders (total) values (10.5), (20) returning id, no, total * 2 as doubled;
+insert into orders (total) values (99) returning *\G
+insert into archive select * from orders where total > 100 returning id;
+```
+
+The shell shows the RETURNING rows as a table, as it does for a `select`, and then the
+inserted-row count. `\G` shows the rows vertically. The rows show the stored values, so they
+include defaults and the values that a sequence or `gen_id()` gave. An `insert … select` that
+inserts no rows shows no table and `0 rows affected`. In `--tui`, the rows go to the result grid.
+
+`returning` is a reserved word, so a column or a table called `returning` needs backticks. The
+server demands the `select` privilege on the table, in addition to `insert`. Over gRPC, the server
+refuses a RETURNING result larger than about 4 MiB with `CADB0550`, and it rolls the insert back.
+`update … returning` and
+`delete … returning` are not available.
+
 Foreign keys:
 
 ```sql
