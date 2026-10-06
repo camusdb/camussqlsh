@@ -356,7 +356,9 @@ internal static class SqlKind
                trimmedSql.StartsWith("create unique index ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
                // ALTER TABLE also adds, drops and renames keys, and a rename moves a name the
-               // completion cache holds. The whole verb is taken rather than each of its forms.
+               // completion cache holds. ADD and DROP CONSTRAINT of a foreign key also create and
+               // drop the constraint's own ~fk_ index on the child. The whole verb is taken rather
+               // than each of its forms.
                trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
     }
 

@@ -538,6 +538,25 @@ if (richEditorSupported)
     ];
 
     string[] functions = [
+        // Foreign keys: REFERENCES <table> [(cols)], FOREIGN KEY (cols) REFERENCES …, ON DELETE|UPDATE
+        // NO ACTION|RESTRICT|CASCADE|SET NULL|SET DEFAULT, MATCH SIMPLE|FULL|PARTIAL, [NOT] DEFERRABLE
+        // and INITIALLY IMMEDIATE|DEFERRED. REFERENCES, FOREIGN, DEFERRABLE and INITIALLY are
+        // reserved words to the parser, and NO ACTION is one token to it. MATCH, its three kinds,
+        // IMMEDIATE and DEFERRED are plain identifiers and stay usable as names. The server refuses
+        // CASCADE, SET NULL, SET DEFAULT, MATCH FULL|PARTIAL and DEFERRABLE by name, but they are
+        // still colored, so a refused statement reads the same as an accepted one. NO, SET, NULL,
+        // DEFAULT, CASCADE and RESTRICT are listed above for other statements.
+        "references",
+        "foreign",
+        "action",
+        "match",
+        "simple",
+        "full",
+        "partial",
+        "deferrable",
+        "initially",
+        "immediate",
+        "deferred",
         "count",
         "max",
         "min",

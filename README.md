@@ -805,7 +805,7 @@ matches, and `Ctrl+Tab` to cycle backwards.
 
 Completion is context-aware. When the word being typed follows a keyword that expects a
 table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`,
-`describe`, or `truncate` — the shell suggests the **table and view names** of the current
+`describe`, `truncate`, or `references` — the shell suggests the **table and view names** of the current
 database. In
 any other position it suggests the SQL keywords, functions, and shell commands.
 
@@ -821,6 +821,7 @@ from the cache.
 ```sql
 select * from us⇥              -- completes to a table such as "users"
 insert into ⇥                  -- cycles through all table names
+city string(80) references ⇥   -- cycles through all table names
 show statistics for ⇥          -- cycles through all table names
 show ranges from table ⇥       -- cycles through all table names
 show ranges from index us⇥     -- completes the table half, such as "users"
@@ -839,7 +840,9 @@ and sequence names from `show sequences`. They are refreshed automatically on st
 (`create`/`drop table`, `create [or replace]`/`drop`/`alter view`, their materialized forms,
 and `create`/`drop`/`alter`/`comment on sequence`). Each of those refreshes also
 drops the cached index names, because an index belongs to one table in one database. Index DDL
-(`create [unique] index`, `drop index`, `alter table`) drops them on its own.
+(`create [unique] index`, `drop index`, `alter table`) drops them on its own. This includes
+`alter table … add constraint … foreign key` and `drop constraint`, which can create and drop the
+constraint's own `~fk_<constraint>` index on the child table.
 
 ## Function Examples
 
@@ -909,6 +912,39 @@ transaction, each statement is its own transaction, so run the `nextval` and the
 one `begin`/`commit` block. A `setval` and an `alter sequence … restart` take about five seconds,
 because the server waits for one storage lease before it reports success. The shell waits up to
 60 seconds for a statement, so this delay does not cause a timeout.
+
+Foreign keys:
+
+```sql
+create table cities (name string(80) not null, population int64, primary key (name));
+create table weather (
+    id   oid not null default (gen_id()),
+    city string(80) references cities (name),
+    temp_lo int64,
+    primary key (id)
+);
+insert into weather (city, temp_lo) values ('Berkeley', 45);   -- CADB0304: no such city
+
+create table employees (id int64 not null, manager_id int64 references employees, primary key (id));
+
+alter table weather drop constraint weather_city_fkey;
+alter table weather add constraint weather_city_fk foreign key (city)
+    references cities (name) on delete restrict on update no action;
+show create table weather;
+```
+
+The server accepts `no action` (the default) and `restrict` for `on delete` and `on update`. It
+refuses `cascade`, `set null`, `set default`, `match full`, `match partial`, `deferrable` and
+`initially deferred` with `CADB0533`. A violation fails with `CADB0304` (no parent),
+`CADB0305` (a delete of a referenced key) or `CADB0306` (an update of a referenced key). The
+server rolls back the whole transaction after a violation, and the shell clears its transaction
+state, as it does for any failed statement in a transaction.
+
+Without a usable index on the referencing columns, the server creates one named
+`~fk_<constraint>`. `show indexes from <table>` lists it, and the `show ranges from index`
+completion offers it. A drop of a table that another table references fails with `CADB0530`.
+Drop the child table, or its constraint, first. Also, `drop constraint` of a foreign key does
+not complete constraint names, because the shell does not load them.
 
 Vectors:
 
