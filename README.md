@@ -1,12 +1,22 @@
 # CamusDB SQL Shell
 
-`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It connects to one CamusDB node through the .NET native protocol driver and provides an interactive SQL prompt with history, multiline editing, syntax coloring, Tab autocompletion, transactions, and script execution, plus a non-interactive mode for running SQL (`-e`/`--execute`) or a whole `.sql` file (`-f`/`--file`) and exiting. A full-screen mode (`--tui`) puts the catalog, the editor and the results on one screen.
+`camus-cli` is the command-line SQL shell for [CamusDB](https://github.com/camusdb/camusdb). It
+connects to a CamusDB server through the .NET driver and gives you:
+
+- An interactive SQL prompt with history, multiline editing, syntax coloring and Tab completion.
+- A non-interactive mode that runs SQL (`-e`) or a `.sql` file (`-f`) and exits.
+- A full-screen mode (`--tui`) with the catalog, the editor and the results on one screen.
+- Workloads that create sample data and put load on a server (`camus-cli workload`).
+
+This README tells you how to use `camus-cli`. For the SQL that CamusDB accepts, its functions, its
+data types, its error codes and the configuration of the server, read the CamusDB documentation:
+**<https://camusdb.github.io/docs/intro/>**.
 
 <img width="809" height="503" alt="cli" src="https://github.com/user-attachments/assets/f50a6b6b-af7f-4212-9246-1bf5cf696f97" />
 
 ## Installation
 
-Install the published NuGet tool:
+Install the published .NET tool:
 
 ```shell
 dotnet tool install --global CamusDB.SqlSh
@@ -18,101 +28,79 @@ Update an existing installation:
 dotnet tool update --global CamusDB.SqlSh
 ```
 
-## Basic Usage
+## Connecting
 
-Start the shell with the default connection:
+Start the shell against a local server:
 
 ```shell
-$ camus-cli
+camus-cli
 ```
 
-By default, the shell connects to:
+With no connection string, the shell tries gRPC on `http://localhost:5096` first. If that fails,
+it uses REST on `http://localhost:5095`. The banner tells you the endpoint, the transport and the
+database:
 
 ```text
-Endpoint=https://localhost:5095;Database=test
+Connected to http://localhost:5096 over gRPC, database: northwind
 ```
 
-Open a specific database using the positional database argument:
+Give a database name as the first argument to make it the current database:
 
 ```shell
-$ camus-cli northwind
+camus-cli northwind
 ```
 
-This connects to:
+With no database name, the session has no current database. Use `use <database>` to select one.
 
-```text
-Endpoint=https://localhost:5095;Database=northwind
-```
-
-Open a custom endpoint and database with a connection string:
+Use `-c` to give a full connection string:
 
 ```shell
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
+camus-cli -c "Endpoint=http://db.example.com:5095;Database=northwind"
 ```
 
-The connection string must include both `Endpoint` and `Database`.
+The connection string must have an `Endpoint`. `Endpoint` can be a comma-separated list of nodes.
+When the connection string has no `Protocol` key, the shell tries gRPC and then REST on the same
+endpoint. Set `Protocol=grpc` or `Protocol=rest` to use one transport only:
+
+```shell
+camus-cli -c "Endpoint=http://localhost:5096;Database=northwind;Protocol=grpc"
+camus-cli -c "Endpoint=http://localhost:5095;Database=northwind;Protocol=rest"
+```
+
+`-c` accepts every key of the .NET driver's connection string. See the
+[.NET driver documentation](https://camusdb.github.io/docs/dotnet-driver/) for the full list.
 
 ## Authentication
 
-CamusDB authentication is **off by default**, and a shell started without credentials behaves
-exactly as before. Against a server started with `CAMUSDB_AUTH_ENABLED=true`, pass a user:
+If the server has authentication on, give a user:
 
 ```shell
-$ camus-cli northwind -u app                 # prompts: Password:
-$ camus-cli northwind -u app -p              # -p with no value prompts too
-$ CAMUS_PASSWORD=app-secret camus-cli northwind -u app
+camus-cli northwind -u app                 # prompts: Password:
+camus-cli northwind -u app -p              # -p with no value prompts too
+CAMUS_PASSWORD=app-secret camus-cli northwind -u app
 ```
 
-The password is exchanged **once** for a short-lived bearer token; every statement then carries
-the token, never the password, and the driver renews it before it expires. The banner names the
-identity the session is acting as:
+The shell sends the password one time to get a short-lived token. Every statement after that
+sends the token, not the password. The banner names the user:
 
 ```text
 Connected to http://localhost:5096 over gRPC, database: northwind, user: app
 ```
 
-Credentials can also come from `CAMUS_USER` / `CAMUS_PASSWORD`, or straight from the connection
-string (`-c "…;User=app;Password=app-secret"`). A flag wins over the same key inside `-c`. When
-another process already holds a token, hand it over with `--token` instead of a password — it is
-used verbatim and never renewed, so its expiry ends the session.
+Other ways to give credentials:
 
-A password that carries a `;`, or that begins or ends with a space, is quoted for the connection
-string, so every password the prompt accepts also reaches the server unchanged.
+- Set `CAMUS_USER` and `CAMUS_PASSWORD`.
+- Put `User=` and `Password=` in the `-c` connection string. A flag wins over the same key in `-c`.
+- Give a token that you got elsewhere with `--token`, or set `CAMUS_ACCESS_TOKEN`. The shell does
+  not renew this token, so the session ends when the token expires.
 
-Prefer the environment or the interactive prompt over `-p` on a shared host: a command line is
-readable by every process on the machine.
-
-### Managing users and grants
-
-User and grant administration is server-level — it needs no current database — and requires a
-superuser. The shell routes these statements accordingly, so they work even before a database is
-selected:
-
-```sql
-create user app identified by 'app-secret';
-alter user app identified by 'rotated-secret';
-grant select, insert on northwind.* to app;
-grant select on northwind.orders to reader;
-revoke insert on northwind.* from app;
-show grants for app;
-drop user app;
-```
-
-A statement that inlines a password (`IDENTIFIED … BY '…'`) is recalled with the Up arrow during
-the session but is **not** written to the on-disk history file.
-
-Two errors are worth recognizing:
-
-| Code | Meaning |
-| --- | --- |
-| `CADB0516` | Not authenticated — missing, invalid, or expired credentials. The server returns the same code for a wrong password and an unknown user, so replies can't be used to enumerate accounts. |
-| `CADB0517` | Authenticated, but missing a privilege on a table the statement touches — including tables reached through joins and subqueries. Fix it with a `GRANT`, not by re-authenticating. |
+Do not use `-p <password>` on a shared host. Every process on the machine can read a command
+line. Use the prompt or `CAMUS_PASSWORD` instead.
 
 ### Plaintext endpoints
 
-Credentials are refused over plaintext (`CADB0519`) unless the endpoint is loopback. The driver
-makes that check itself, when it parses the connection string, so the shell stops **before** the
-password reaches the network — a server that was started without its own check never sees it:
+The shell refuses to send credentials to an `http://` endpoint that is not on this machine. It
+stops before the password goes on the network:
 
 ```text
 $ camus-cli northwind -c "Endpoint=http://db.internal:5095" -u app
@@ -120,130 +108,121 @@ Connection failed (CADB0519): This connection string configures credentials agai
 'http://db.internal:5095', which is neither https nor loopback.
 ```
 
-Use an `https://` endpoint against any remote deployment.
+Use an `https://` endpoint for a remote server. If TLS ends in front of the server and the last
+connection is in a safe network, add `--allow-insecure-credentials`. The shell then writes a
+warning to stderr and connects. Nothing checks that the network is safe.
 
-Both ends raise `CADB0519`, and each is waived on its own. Where TLS terminates in front of the
-server and the last hop is inside the trust boundary, pass `--allow-insecure-credentials` to the
-shell, and start the server with `--require-tls-when-auth-enabled false`. The shell then names what
-the waiver allows on stderr and connects. Nothing verifies that the link is safe, so use the waiver
-only when it is.
+For users, grants and the server settings for authentication, see
+[Authentication](https://camusdb.github.io/docs/sql-authentication/).
 
 ## Command Line Options
 
 ```text
 camus-cli [database] [options]
+camus-cli workload <init|run> <bank|northwind|factory|tpcc|tpcb> [options]
 ```
 
 | Option | Description |
 | --- | --- |
-| `[database]` | Optional database name. Defaults to `test` when no connection string is provided. |
-| `-c`, `--connection-source` | Full CamusDB connection string. Must include `Endpoint` and `Database`. |
-| `-e`, `--execute` | Execute the given SQL and exit without starting the interactive shell. See [Non-Interactive Execution](#non-interactive-execution). |
-| `-f`, `--file` | Execute the statements in a `.sql` file and exit, stopping at the first error. Use `-f -` to read the script from standard input. See [Running a .sql File](#running-a-sql-file). |
-| `-u`, `--user` | User to authenticate as. Only needed against a server with authentication enabled. See [Authentication](#authentication). |
-| `-p`, `--password` | That user's password. Give `-p` with no value to be prompted for it (without echoing); `-u` alone prompts too. Prefer the prompt or `CAMUS_PASSWORD`: on the command line the password is visible to every other process on the machine, and each use prints a warning. |
-| `--token` | Use a bearer token obtained elsewhere instead of logging in with a password. |
-| `--allow-insecure-credentials` | Send credentials to a plaintext `http://` endpoint that is not on this machine. Refused without it. See [Plaintext endpoints](#plaintext-endpoints). |
+| `[database]` | The current database at start. If you do not give it, the session has no current database. |
+| `-c`, `--connection-source` | A full connection string. It must have `Endpoint`. |
+| `-e`, `--execute` | Run the given SQL and exit. See [Non-Interactive Execution](#non-interactive-execution). |
+| `-f`, `--file` | Run the statements in a `.sql` file and exit. The shell stops at the first error. Use `-f -` to read standard input. See [Running a .sql File](#running-a-sql-file). |
+| `-u`, `--user` | The user to authenticate as. See [Authentication](#authentication). |
+| `-p`, `--password` | The password of that user. Give `-p` with no value to get a prompt. |
+| `--token` | Use a bearer token instead of a user and a password. |
+| `--allow-insecure-credentials` | Send credentials to an `http://` endpoint that is not on this machine. See [Plaintext endpoints](#plaintext-endpoints). |
 | `--no-history` | Do not load or save the statement history. |
-| `--tui` | Open the full-screen mode: catalog, editor and results in three panes. Needs an ANSI terminal. See [Full-Screen Mode](#full-screen-mode---tui). |
-| `--force-rich` | Force the rich line editor (colors, multiline, Tab completion) even when the terminal's `TERM` value is not recognized. See [Terminal Detection](#terminal-detection). |
-| `--diagnose-terminal` | Print the detected terminal capabilities and exit. Useful for diagnosing why the rich editor is disabled. |
+| `--tui` | Open the full-screen mode. See [Full-Screen Mode](#full-screen-mode---tui). |
+| `--force-rich` | Use the rich line editor also when the shell does not know the terminal. See [Terminal Detection](#terminal-detection). |
+| `--diagnose-terminal` | Print the terminal capabilities that the shell found, and exit. |
 | `-h`, `--help` | Show help. |
-| `-v`, `--version` | Show version. |
+| `-v`, `--version` | Show the version. |
 
 Environment variables:
 
 | Variable | Description |
 | --- | --- |
-| `CAMUS_FORCE_RICH` | Set to `1`, `true`, or `yes` to force the rich line editor (same as `--force-rich`). |
-| `CAMUS_USER` | Default for `-u`. |
-| `CAMUS_PASSWORD` | Default for `-p`. Preferred over `-p` in scripts, since a command line is visible to every process on the host. |
-| `CAMUS_ACCESS_TOKEN` | Default for `--token`. |
+| `CAMUS_FORCE_RICH` | Set to `1`, `true` or `yes` to do the same as `--force-rich`. |
+| `CAMUS_USER` | The default for `-u`. |
+| `CAMUS_PASSWORD` | The default for `-p`. Use it in scripts instead of `-p`. |
+| `CAMUS_ACCESS_TOKEN` | The default for `--token`. |
 
 Examples:
 
 ```shell
-$ camus-cli
-$ camus-cli northwind
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
-$ camus-cli northwind -e "select * from users"
-$ camus-cli --version
-$ camus-cli -v
-$ camus-cli --help
-$ camus-cli -h
+camus-cli
+camus-cli northwind
+camus-cli northwind -u app
+camus-cli -c "Endpoint=http://localhost:5095;Database=northwind"
+camus-cli northwind -e "select * from users"
+camus-cli northwind -f schema.sql
+camus-cli northwind --tui
+camus-cli --version
 ```
 
 ## Interactive Shell
 
-When the terminal supports ANSI rendering, `camus-cli` starts an enhanced interactive editor.
-
-Prompt:
+When the terminal supports ANSI, `camus-cli` starts a rich line editor. The prompt is:
 
 ```text
 camus>
 ```
 
-Continuation prompt for multiline input:
+A statement that continues on more lines shows this prompt:
 
 ```text
    ->
 ```
 
-Exit the shell:
+### Shell commands
 
-```sql
-exit
-```
+The shell runs these commands itself. It does not send them to the server.
 
-or:
+| Command | Action |
+| --- | --- |
+| `use <database>` | Make `<database>` the current database. |
+| `source <file> [--force]` | Run the statements in a file. See [Script Files](#script-files). |
+| `show prepared [sql]` | Show the statements that the driver keeps prepared. See [Prepared statements](#prepared-statements). |
+| `backup …` | Take and manage backups. See [Backups](#backups). |
+| `clear` | Clear the screen. |
+| `exit`, `quit` | Leave the shell. |
 
-```sql
-quit
-```
+All other text goes to the server as SQL.
 
-If a transaction is active, the shell requires `commit` or `rollback` before exit.
-
-Clear the screen:
-
-```sql
-clear
-```
-
-Run SQL from a file:
-
-```sql
-source ./schema.sql
-```
-
-Switch the current database:
+### Switching databases
 
 ```sql
 use northwind;
 use `order details`;
 ```
 
-`use` is handled by the shell rather than the server — the database is part of the connection
-string, so the shell reopens the connection against it. The name may be bare, `` `backticked` ``,
-or `"quoted"`, which is how a name that collides with a keyword or contains spaces is written.
-It works in script files and with `-e` as well as at the prompt, so a dump can switch databases
-mid-file, and a session started without a database can select one from its first statement.
+The database is part of the connection string, so `use` opens the connection again with the new
+database. Write the name bare, in `` `backticks` `` or in `"double quotes"`. Use quotes for a name
+that is a keyword or that has spaces in it.
 
-Take and administer backups:
+`use` works at the prompt, in script files, with `-e` and with `-f`. Thus a script can change the
+database in the middle of the file. The shell refuses `use` in an open transaction.
 
-```sql
-backup full
-backup list
-```
+### Transactions
 
-Like `use`, the `backup` family is the shell's rather than the server's — see [Backups](#backups).
+The shell keeps track of the transaction that `begin` (or `start transaction`) opens:
+
+- You can have only one open transaction at a time.
+- `exit` and `quit` do not work while a transaction is open. Run `commit` or `rollback` first.
+- If `commit` or `rollback` fails, the shell forgets the transaction, so you can start a new one.
+- If a statement in the transaction fails, the shell also forgets the transaction.
+
+For what a transaction does on the server, see
+[Transactions](https://camusdb.github.io/docs/sql-transactions/).
 
 ### Prepared statements
 
-The driver registers a statement with the server once it has seen the same SQL a couple of
-times, and runs it prepared from then on. Nothing has to be enabled, and a prepared
-execution returns exactly what an inline one does.
+After the driver sees the same SQL two times, it prepares that statement on the server and runs
+it prepared from then on. You do not have to turn this on. A prepared statement returns the same
+result as an inline one.
 
-`show prepared` reports what is currently registered:
+`show prepared` tells you what the driver keeps prepared:
 
 ```text
 camus> show prepared
@@ -252,7 +231,7 @@ Prepared statements: 1 (MaxAutoPrepare=128, AutoPrepareMinUsages=2)
 (the statement you ran last)
 ```
 
-Pass a statement to ask about that one instead of the last one you ran:
+Give a statement to ask about that statement instead of the last one:
 
 ```sql
 show prepared select id from robots where year = 1984
@@ -260,90 +239,22 @@ show prepared select id from robots where year = 1984
 
 `\prepared` is an alias for both forms.
 
-Typed statements usually report as `inline`: they carry their values in the SQL text, so
-each execution is distinct text and never repeats often enough to be registered. The
-statements that do get prepared are the ones a `source` file or an application repeats
-verbatim. Both thresholds come from the connection string — `MaxAutoPrepare=` (how many
-statements stay registered; `0` turns registration off) and `AutoPrepareMinUsages=` (how
-many executions come first):
+A statement that you type usually shows as `inline`. It has its values in the SQL text, so each
+run is different text. The statements that the driver prepares are usually the ones that a
+`source` file repeats with the same text. Two connection string keys control this:
+
+- `MaxAutoPrepare=` sets how many statements stay prepared. `0` turns the feature off.
+- `AutoPrepareMinUsages=` sets how many runs come before the driver prepares a statement.
 
 ```shell
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=demo;MaxAutoPrepare=512;AutoPrepareMinUsages=1"
+camus-cli -c "Endpoint=http://localhost:5095;Database=demo;MaxAutoPrepare=512;AutoPrepareMinUsages=1"
 ```
 
-## Non-Interactive Execution
-
-Pass `-e` (or `--execute`) with a SQL string to run it immediately and exit, without
-starting the interactive prompt. This is useful for scripts, cron jobs, CI pipelines, and
-one-off queries:
-
-```shell
-$ camus-cli northwind -e "select * from users"
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -e "show tables"
-```
-
-The target database is taken from the positional `[database]` argument or the `-c`
-connection string, exactly as in interactive mode.
-
-Results are rendered the same way as in the interactive shell: query statements print a
-table, while DDL and mutation statements print affected row counts.
-
-You can pass several statements separated by semicolons; they run in order:
-
-```shell
-$ camus-cli demo -e "insert into users (id, name) values (gen_id(), 'Ada'); select * from users"
-```
-
-Vertical output with `\G` also works in this mode:
-
-```shell
-$ camus-cli demo -e "select * from users\G"
-```
-
-The process exits after the SQL completes, so `-e` can be combined with shell redirection
-and piping like any other command:
-
-```shell
-$ camus-cli demo -e "select * from users" > users.txt
-```
-
-### Running a .sql File
-
-Pass `-f` (or `--file`) with a path to run every statement in a `.sql` file and exit, so a
-schema or a migration can be applied without opening the interactive console:
-
-```shell
-$ camus-cli northwind -f schema.sql
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -f seed.sql
-```
-
-Statements are separated by semicolons and run in order, and `\G` and comments are handled
-exactly as with `source` inside the shell — the file is streamed, so its size doesn't matter.
-Execution stops at the first statement that fails: the error is printed with the offending
-statement and the line it started on, the remaining statements are left unrun, and the process
-exits with status `1`.
-
-Use `-` as the path to read the script from standard input:
-
-```shell
-$ cat schema.sql | camus-cli northwind -f -
-$ camus-cli northwind -f - <<'SQL'
-create table users (id oid primary key, name string);
-insert into users values (gen_id(), 'Ada');
-SQL
-```
-
-`-f` and `-e` can be combined; the file runs first, so `-e` can read back what it wrote:
-
-```shell
-$ camus-cli demo -f seed.sql -e "select count(*) from users"
-```
+See [Prepared Statements](https://camusdb.github.io/docs/prepared-statements/) for more.
 
 ## Multiline Input
 
-The shell supports multiline SQL input.
-
-Use `Shift+Enter` to insert a new line manually:
+Press `Shift+Enter` to start a new line:
 
 ```sql
 select
@@ -353,9 +264,10 @@ from users
 where active = true;
 ```
 
-Pasting multiline SQL is also supported. When a pasted statement contains multiple lines, the editor converts pasted `Enter` keys into new lines instead of immediately submitting the SQL.
+When you paste text that has more than one line, the editor makes each pasted `Enter` a new line.
+It does not run the text immediately.
 
-The shell keeps collecting input when a statement is incomplete. A statement is considered incomplete when it has:
+The shell also continues to collect lines when a statement is not complete:
 
 | Incomplete form | Example |
 | --- | --- |
@@ -364,73 +276,113 @@ The shell keeps collecting input when a statement is incomplete. A statement is 
 | Open parenthesis | `select concat(` |
 | Trailing comma | `select id,` |
 
-Multiple SQL statements can be submitted together when they are separated by semicolons:
+Use semicolons to send more than one statement at a time. A semicolon in a quoted string does not
+split the statement:
 
 ```sql
-insert into users (id, name) values (gen_id(), 'Ada');
+insert into users (id, name) values (1, 'Ada; Lovelace');
 select * from users;
 ```
-
-Semicolons inside single or double quoted strings do not split statements.
 
 ## Keyboard Shortcuts
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Submit the current statement. |
-| `Shift+Enter` | Insert a new line in multiline mode. |
-| `Up` | Move to the previous line in multiline input, or previous history item from the first line. |
-| `Down` | Move to the next line in multiline input, or next history item from the last line. |
+| `Enter` | Run the current statement. |
+| `Shift+Enter` | Start a new line. |
+| `Up` | Go to the previous line. On the first line, go to the previous history item. |
+| `Down` | Go to the next line. On the last line, go to the next history item. |
 | `Left` / `Right` | Move the cursor. |
-| `Ctrl+Left` / `Ctrl+Right` | Move by word. |
-| `Home` / `End` | Move to the beginning or end of the current line. |
-| `PageUp` / `PageDown` | Move to the first or last line of multiline input. |
+| `Ctrl+Left` / `Ctrl+Right` | Move one word. |
+| `Home` / `End` | Go to the start or the end of the line. |
+| `PageUp` / `PageDown` | Go to the first or the last line. |
 | `Backspace` / `Delete` | Delete text. |
-| `Tab` | Autocomplete the current word (see [Autocompletion](#autocompletion)). |
-| `Ctrl+Tab` | Cycle to the previous completion. |
+| `Tab` | Complete the current word. See [Autocompletion](#autocompletion). |
+| `Ctrl+Tab` | Go to the previous completion. |
+
+## Syntax Coloring
+
+The editor gives a different color to each of these groups:
+
+- SQL keywords.
+- Function names.
+- Shell commands.
+- Constants, numbers and quoted strings.
+- Comments.
+
+The word lists follow the grammar of the server. Some colored words are not reserved by the
+server, so you can still use them as table and column names.
+
+## Autocompletion
+
+Press `Tab` to complete the word at the cursor. Press it again to go to the next match. Press
+`Ctrl+Tab` to go back.
+
+The completion looks at the word before the cursor:
+
+| After | The shell suggests |
+| --- | --- |
+| `from`, `into`, `update`, `join`, `table`, `view`, `desc`, `describe`, `truncate`, `references` | Table and view names of the current database. |
+| `show statistics for` | Table names. |
+| `show ranges from index` | `table@index` names. Before the `@` you get table names. After it you get the indexes of that table. |
+| `alter`, `drop`, `show create` or `comment on` + `sequence` | Sequence names. |
+| `set cluster setting`, `reset cluster setting` | Configuration keys. |
+| Any other word | SQL keywords, functions and shell commands. |
+
+```sql
+select * from us⇥              -- completes to a table such as "users"
+insert into ⇥                  -- cycles through all table names
+show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
+drop sequence ⇥                -- cycles through all sequence names
+sel⇥                           -- completes to "select"
+```
+
+The shell loads the names from the server. It loads them again at start, after `use`, and after a
+statement that creates, drops or changes a table, a view or a sequence. It loads the index names
+of a table at the first `Tab` that needs them. If that load is slow, the `Tab` completes nothing,
+and the next `Tab` uses the names that the load got.
 
 ## Full-Screen Mode (`--tui`)
 
-`--tui` replaces the prompt with a full-screen mode. The screen holds three panes:
+`--tui` replaces the prompt with a full-screen mode. The screen has three panes:
 
-1. **Data Catalog**, on the left. It lists the tables of the current database. Expand a table to read its columns and their types.
-2. **Query Editor**, at the top right. It holds the SQL. It colors the SQL with the same word list as the prompt, and it offers the same completions.
-3. **Query Results**, at the bottom right. It shows the rows of the last query. It also keeps one log line for each statement that ran.
+1. **Data Catalog**, on the left. It lists the tables of the current database. Expand a table to see its columns and their types.
+2. **Query Editor**, at the top right. It colors the SQL and completes words as the prompt does.
+3. **Query Results**, at the bottom right. It shows the rows of the last query and one log line for each statement.
 
-A status bar below the panes reports the elapsed time, the row count and any error. A key bar sits at the foot of the screen.
+A status bar below the panes shows the time, the row count and errors. A key bar is at the bottom
+of the screen.
 
 <img width="808" height="507" alt="tui" src="https://github.com/user-attachments/assets/fe53b8df-8f8c-4b20-ba16-47d41e3d0851" />
 
-Start the mode with the `--tui` flag:
-
 ```shell
-$ camus-cli northwind --tui
+camus-cli northwind --tui
+camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" --tui
 ```
 
-```shell
-$ camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" --tui
-```
-
-The mode needs an ANSI terminal. On a terminal whose `TERM` value Spectre.Console does not recognize, `--tui` prints an error and exits. Add `--force-rich` to start it anyway. See [Terminal Detection](#terminal-detection).
+The mode needs an ANSI terminal. If Spectre.Console does not know the `TERM` value of the
+terminal, `--tui` shows an error and exits. Add `--force-rich` to start it anyway. See
+[Terminal Detection](#terminal-detection).
 
 ### Keys
 
-These keys work in every pane:
+These keys work in all panes:
 
 | Key | Action |
 | --- | --- |
-| `Tab` | Move to the next pane. |
-| `Shift+Tab` | Move to the previous pane. |
-| `Shift+Enter` | Run the statements in the editor. See the note below. |
-| `F5` | Run the statements in the editor. |
-| `Ctrl+R` | Run the statements in the editor. |
-| `Esc` | Cancel the query that runs now, or close the help bar. |
+| `Tab` | Go to the next pane. |
+| `Shift+Tab` | Go to the previous pane. |
+| `F5`, `Ctrl+R`, `Shift+Enter` | Run the statements in the editor. |
+| `Esc` | Cancel the running query, or close the help bar. |
 | `F1` | Show or hide the key list. |
-| `F2` | Turn the row cap on or off. See [Row Cap and Paging](#row-cap-and-paging). |
+| `F2` | Turn the row cap on or off. See [Row cap and paging](#row-cap-and-paging). |
 | `Ctrl+S` | Save the editor text to the query file. |
-| `Ctrl+L` | Empty the editor. |
-| `Ctrl+U` | Empty the editor. |
+| `Ctrl+L`, `Ctrl+U` | Empty the editor. |
 | `Ctrl+Q` | Quit. |
+
+`Shift+Enter` needs a terminal that supports the disambiguating keyboard protocol, for example
+Ghostty, Kitty, WezTerm or a recent iTerm2. On other terminals, `Shift+Enter` starts a new line.
+`F5` works on all terminals.
 
 These keys work in the Data Catalog pane:
 
@@ -439,8 +391,8 @@ These keys work in the Data Catalog pane:
 | `Up` / `Down` | Move the selection. |
 | `Right` / `Enter` | Expand the selected table. |
 | `Left` | Collapse the selected table. |
-| `Home` / `End` | Move to the first or last row. |
-| `Space` | Insert the selected name into the editor at the cursor. |
+| `Home` / `End` | Go to the first or the last row. |
+| `Space` | Put the selected name into the editor at the cursor. |
 
 These keys work in the Query Editor pane:
 
@@ -449,10 +401,12 @@ These keys work in the Query Editor pane:
 | `Enter` | Start a new line. |
 | `Up` / `Down` | Move between lines. |
 | `Left` / `Right` | Move the cursor. |
-| `Home` / `End` | Move to the beginning or end of the current line. |
+| `Home` / `End` | Go to the start or the end of the line. |
 | `Backspace` / `Delete` | Delete text. |
-| `Ctrl+N` | Complete the current word, or step to the next candidate. |
-| `Ctrl+P` | Step to the previous candidate. |
+| `Ctrl+N` | Complete the current word, or go to the next match. |
+| `Ctrl+P` | Go to the previous match. |
+
+`Tab` moves between panes, so the editor uses `Ctrl+N` and `Ctrl+P` for completion.
 
 These keys work in the Query Results pane:
 
@@ -460,280 +414,196 @@ These keys work in the Query Results pane:
 | --- | --- |
 | `Up` / `Down` | Scroll one row. |
 | `PageUp` / `PageDown` | Scroll one screen. |
-| `Left` / `Right` | Scroll one whole column. |
-| `Home` | Move to the first row and the first column. |
-| `End` | Move to the last row. |
-
-`Tab` moves between panes, so the editor uses `Ctrl+N` and `Ctrl+P` for completion instead.
-
-`Shift+Enter` needs a terminal that speaks the disambiguating keyboard protocol. Ghostty, Kitty, WezTerm and recent iTerm2 versions all speak it. On any other terminal, `Shift+Enter` starts a new line. `F5` runs the statements on every terminal.
+| `Left` / `Right` | Scroll one column. |
+| `Home` | Go to the first row and the first column. |
+| `End` | Go to the last row. |
 
 ### What the editor runs
 
-`F5` runs every statement in the editor, in order. Separate the statements with semicolons. The Query Results pane keeps one log line for each statement. The grid shows the rows of the last query statement.
+`F5` runs all statements in the editor, in order. Put a semicolon between statements. The Query
+Results pane shows one log line for each statement, and the grid shows the rows of the last query.
 
-The editor accepts the same SQL as the prompt, which includes:
-
-- Query statements, DDL and DML. See [SQL Execution](#sql-execution).
-- `begin`, `commit` and `rollback`. See [Transactions](#transactions).
-- `use <database>`, which reconnects and reloads the catalog.
-- Server-level and system-level statements, such as `show databases`.
-
-A statement that creates or drops a table reloads the catalog by itself.
-
-Backup commands are the one exception. They run at the prompt only. In `--tui` they report an error. See [Backups](#backups).
+The editor accepts the same input as the prompt, with one exception: the `backup` commands work
+at the prompt only. `use <database>` connects again and loads the catalog again. A statement that
+creates or drops a table also loads the catalog again.
 
 ### Row cap and paging
 
-The results grid does not read a whole table into memory. It reads the first 200 rows, then reads 200 more each time you scroll near the end of what it holds.
+The grid does not read the full result into memory. It reads the first 200 rows. When you scroll
+near the end, it reads 200 more.
 
-A cap of 500 rows is on at start. With the cap on, the grid stops at 500 rows and never reads the rest. Press `F2` to turn the cap off, and the grid then pages through the whole result. The cap is a display cap. It is not a SQL `LIMIT`, so the statement itself is unchanged.
+At start, a cap of 500 rows is on, so the grid stops at 500 rows. Press `F2` to turn the cap off
+and page through the full result. The cap is for the display only. It does not add a `LIMIT` to
+the statement.
 
 ### The query file
 
-The editor text is kept between sessions in a file under the user's own profile, next to the history file (see [History](#history)): `<state directory>/query.sql`. The state directory is created with owner-only permissions, so other local users cannot read the query buffer.
+The shell keeps the editor text in `query.sql`, in the same directory as the history file (see
+[History](#history)). The mode loads this file at start and saves it at exit. Press `Ctrl+S` to
+save it at any time.
 
-The mode loads this file at start, and saves it at exit. Press `Ctrl+S` to save it at any time. Press `Ctrl+L` or `Ctrl+U` to empty the editor.
+## Non-Interactive Execution
+
+Use `-e` (or `--execute`) to run SQL and exit. This is useful for scripts, cron jobs and CI:
+
+```shell
+camus-cli northwind -e "select * from users"
+camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -e "show tables"
+```
+
+The output is the same as at the prompt. You can give more than one statement, separated by
+semicolons, and you can use `\G`:
+
+```shell
+camus-cli demo -e "insert into users (id, name) values (1, 'Ada'); select * from users"
+camus-cli demo -e "select * from users\G"
+camus-cli demo -e "select * from users" > users.txt
+```
+
+In this mode the shell does not print the connection banner. If a statement fails, the process
+exits with status `1`.
+
+### Running a .sql File
+
+Use `-f` (or `--file`) to run all statements in a `.sql` file and exit:
+
+```shell
+camus-cli northwind -f schema.sql
+camus-cli -c "Endpoint=http://localhost:5095;Database=northwind" -f seed.sql
+```
+
+The shell reads the file as `source` does (see [Script Files](#script-files)). It stops at the
+first statement that fails. It prints the error, the statement and the line where the statement
+starts, and it exits with status `1`.
+
+Use `-` as the path to read the script from standard input:
+
+```shell
+cat schema.sql | camus-cli northwind -f -
+camus-cli northwind -f - <<'SQL'
+create table users (id int64 primary key, name string);
+insert into users values (1, 'Ada');
+SQL
+```
+
+You can use `-f` and `-e` together. The file runs first:
+
+```shell
+camus-cli demo -f seed.sql -e "select count(*) from users"
+```
+
+## Script Files
+
+Use `source` to run a file of SQL statements from the prompt:
+
+```sql
+source ./seed.sql
+```
+
+The shell reads the file as a stream, so the size of the file is not important. The first
+statement runs before the shell reads the rest of the file.
+
+The shell splits statements at semicolons. It ignores a semicolon in:
+
+- `'single-quoted strings'` and `"double-quoted strings"`.
+- `` `quoted identifiers` ``.
+- `-- line comments`, `# line comments` and `/* block comments */`.
+
+The shell understands doubled quotes (`'it''s'`) and backslash escapes (`'it\'s'`). It removes
+comments before it sends a statement to the server.
+
+The shell stops at the first statement that fails. It tells you the file and the line where the
+statement starts. Add `--force` to continue past failures and get a summary at the end:
+
+```sql
+source ./seed.sql --force
+```
+
+A failure in an open transaction stops the file also with `--force`, because the rest of the
+transaction cannot run.
+
+A file can contain `use` statements. A `use` in an open transaction stops the file.
+
+## Output
+
+The shell shows the rows of a query as a table:
+
+```text
++----+------+
+| id | name |
++----+------+
+| 1  | Ada  |
++----+------+
+1 rows in set (00:00:00.0123456)
+```
+
+For other statements, it shows the number of rows that changed:
+
+```text
+Query OK, 1 rows affected (00:00:00.0123456)
+```
+
+For an error, it shows the exception type, the error code and the message. If the message gives a
+line and a column, the shell also shows that line of the statement with a `^` under the column.
+For the authentication errors `CADB0516`, `CADB0517` and `CADB0519`, it also shows a hint. See
+[Error Codes](https://camusdb.github.io/docs/error-codes/) for all codes.
+
+The shell shows each value in the form that you can type back into a statement. For example, it
+shows a `bytes` value as an `x'…'` literal, and it shows a `numeric` value with all its digits.
+
+### Vertical Output (`\G`)
+
+End a statement with `\G` instead of `;` to show each row vertically, with one column on each
+line. This is useful for wide rows:
+
+```sql
+select * from users\G
+```
+
+```text
+*************************** 1. row ***************************
+  id: 1
+name: Ada
+1 rows in set (00:00:00.0123456)
+```
+
+`\G` works at the prompt, in `source` files, with `-e` and with `-f`. It also works in a list of
+statements (`select 1; select 2\G`).
 
 ## History
 
-Executed statements are stored in a JSON history file under the user's own profile — `$XDG_STATE_HOME/camusdb/history.json` when that variable is set, otherwise `~/.config/camusdb/history.json` on Linux and macOS and `%LOCALAPPDATA%\camusdb\history.json` on Windows. The directory is created with owner-only permissions (0700 on Unix) and the file is written only for the owning user, so other local users cannot read it. The file holds at most the 2,000 most recent statements.
+The shell saves the statements that you run in a JSON file:
 
-History is loaded when the shell starts and saved when the shell exits normally or receives `Ctrl+C`. Repeating the same command consecutively stores it only once. Statements that inline a password (`CREATE USER … IDENTIFIED BY '…'`, `ALTER USER …`) are kept out of the file — they stay recallable with `Up` for the rest of the session only. Run the shell with `--no-history` to skip the file entirely.
-
-Use `Up` and `Down` to navigate history. In multiline input, `Up` and `Down` first move between lines; from the first or last line they navigate history.
-
-## SQL Execution
-
-The shell sends SQL to CamusDB and displays results in a table for query statements. It prints affected row counts for non-query statements and DDL.
-
-Query statements include:
-
-```sql
-select * from users;
-explain select * from users;
-explain (logical) select * from users;
-explain (physical) select * from users;
-explain (analyze) select * from users;
-show tables;
-desc users;
-describe users;
-show statistics for users;
-show ranges from table users;
-show slow queries;
-```
-
-### Table statistics
-
-`show statistics for <table>` prints what the optimizer believes about a table — the estimated row count, per-column minimum and maximum, histogram bucket counts, approximate distinct values, per-index entry counts, and how stale all of it is. `TABLE` is an optional noise word, so `show statistics for table users` is the same statement.
-
-```sql
-analyze users;                          -- collect histograms and distinct-value counts
-show statistics for users;
-show statistics for users\G             -- ten columns; vertical output is easier to read
-```
-
-One row per statistics target, discriminated by the `kind` column (`table`, `column`, `key`, `index`). A `null` means either "does not apply to this row" or "never collected" — `kind` tells you which. `last_analyzed` and `stale_mutations` describe the whole table and repeat on every row.
-
-The values are the answering node's view and include mutations it has not flushed yet, so in a cluster two nodes may report different values for the same table. Materialized views have statistics of their own; a plain view does not.
-
-### Ranges
-
-CamusDB divides a table's row space, and each order-safe index space, across Raft partitions, and
-splits them further as they grow. `show ranges` prints that layout. One row per span, in the order
-the router searches them.
-
-```sql
-show ranges from table users;
-show ranges from index users@by_email;
-show ranges from table users\G            -- fifteen columns; vertical output is easier to read
-```
-
-`show range … for row (…)` prints the single span that holds one row:
-
-```sql
-show range from table users for row (1500);            -- by primary key
-show range from index users@by_email for row ('a@example.com');
-```
-
-The two `for row` forms differ. On an **index** the key is computed from the values alone, so it
-answers for a key that does not exist, and fewer values than the index has key columns are accepted
-— a prefix still lands in one span. On a **table** the row key is ordered by the row id the engine
-minted, not by the primary key, so the server point-reads the primary index to find the row. A
-primary key no row carries is an error there, not an empty result. That probe takes no lock and
-joins no read set, so the statement is safe inside a transaction.
-
-Three columns are worth reading carefully. `routing` is `key_range` or `hash` **as this node routes
-the space**; a hash-routed space has exactly one span with both bounds null. `leader` is a gossip
-hint, and a null means unknown rather than "no leader". `replicas` empty means legacy full
-replication, not "no replicas". Every column describes the node that answered, so two nodes may
-legitimately disagree, and there is no cluster-wide form.
-
-Read `partition_id`, not `span`, to talk about the same range across two runs: a split renumbers
-every span after it, while the partition keeps its identity. `start_key` and `end_key` are decoded
-in column terms, and `raw_start_key`/`raw_end_key` carry the encoded bounds; a bound that will not
-decode falls back to its raw text rather than failing the statement.
-
-Three spellings reach the primary index: `t@~pk`, `t@t_pkey` and `t@primary`. The target takes no
-quoted identifiers — `` `my_table`@`my_index` `` does not parse. A plain view has no key space of
-its own; ask for the ranges of the tables its body reads. The statement needs `select` on the
-target, and it reports only: it never moves a range.
-
-### Slow query log
-
-The server can record every statement that ran at or over a duration you set, with the execution
-facts that explain the duration. `show slow queries` reads that record back. Rows come back newest
-first, so a bare statement answers "what just happened" without an `order by`.
-
-```sql
-show slow queries;
-show slow queries like '%from orders%';
-show slow queries\G                       -- fourteen columns; vertical output is easier to read
-```
-
-The log is **off by default**. Turn it on per node in the server's `config.yml`
-(`slow_query_log_enabled`, `slow_query_log_threshold_ms`, `slow_query_log_max_entries`,
-`slow_query_log_max_sql_length`), and confirm what a node resolved with `show variables like
-'slow_query%'`. A node that started with the log off has no ring at all, so turning the setting on
-at runtime records nothing — that one needs a restart.
-
-Three columns answer most "why was this slow" questions without a second run. `full_scan` means the
-plan read a whole relation instead of seeking through an index. `spilled` means a sort, grouping,
-distinct or hash join outgrew its memory budget and wrote to disk. `rows_read` far above
-`rows_returned` is the signature of a predicate no index serves.
-
-`outcome` is `completed`, `abandoned` or `failed`. `abandoned` means the caller stopped reading
-early, so `rows_returned` is a floor rather than a total; the work was still done, which is why the
-entry is kept. `failed` carries an `error_code`, and a slow failure is usually the most interesting
-entry in the log.
-
-`seq` keeps counting past the ring's capacity. If the newest `seq` advanced between two readings by
-more than the number of entries the ring holds, entries were overwritten in between and you are not
-seeing everything that qualified.
-
-The statement needs a **superuser**, the same bar as `show engine stats` and `show variables`, and a
-sharper reason: the rows carry the literal SQL other users ran, so a predicate value from a table
-the caller holds no grant on can appear verbatim. Like the other node-level statements it runs
-without a current database, it reports only the node that answered, and its entries do not survive a
-restart.
-
-DDL statements include:
-
-```sql
-create table users (
-  id object_id primary key,
-  name string not null,
-  active bool default true
-);
-
-create index users_name on users (name);
-alter table users rename column name to full_name;
-drop index users_name;
-truncate table users;                   -- empties the table; the table itself stays
-drop table users;
-```
-
-`truncate [table] <table>` deletes every row of a base table in one step. The cost does not grow
-with the row count, because the server replaces the key space the rows live in. The table keeps its
-name, its columns, its indexes and its comments. The `table` keyword is optional, so
-`truncate users` does the same thing.
-
-The server refuses `truncate` inside an explicit transaction. It commits a replicated schema change
-that a later `rollback` cannot undo. Run `commit` or `rollback` first. The statement needs both the
-`delete` and the `drop` privilege on the table.
-
-Mutation statements include:
-
-```sql
-insert into users (id, name, active)
-values (gen_id(), 'Ada Lovelace', true);
-
-update users
-set active = false
-where name = 'Ada Lovelace';
-
-delete from users
-where active = false;
-```
-
-## Transactions
-
-Start a transaction:
-
-```sql
-begin;
-```
-
-or:
-
-```sql
-start transaction;
-```
-
-Commit:
-
-```sql
-commit;
-```
-
-Rollback:
-
-```sql
-rollback;
-```
-
-Only one active transaction is allowed at a time. If `commit` or `rollback` fails, the shell clears its local transaction state so a new transaction can be started.
-
-With [learned routing](#learned-routing) on, the driver defers `BEGIN` to the first statement of
-the transaction, so the transaction starts on the node that leads that statement's data. The shell
-reports `begin` as it always did; a server that refuses the `BEGIN` reports it on the first
-statement instead. With routing off — the default — `BEGIN` is sent when you type it.
-
-## Learned routing
-
-A CamusDB server can attach advisory routing metadata to a successful response: which node leads
-the data behind that statement. The driver learns from it and sends the statement's later
-executions straight to that node, which saves a forwarding hop. It changes no result and no
-isolation level; it is a latency optimization only.
-
-The shell turns it on through the connection string, because the trust map is a deployment's own
-list of nodes:
-
-```shell
-$ camus-cli northwind -c "Endpoint=http://a:5095,http://b:5095,http://c:5095;RoutingMode=Learned;\
-RoutingNodes='camus-a:7070=http://a:5095,camus-b:7070=http://b:5095,camus-c:7070=http://c:5095'"
-```
-
-| Key | Description |
+| Platform | Path |
 | --- | --- |
-| `RoutingMode` | `Auto` (the default: routing engages only when `RoutingNodes` maps two or more distinct endpoints), `Learned`, or `Off`. |
-| `RoutingNodes` | Maps each server node identity to a member of the `Endpoint` pool. Quote the value: it carries `=`. An address that the `Endpoint` pool does not list is dropped, so a reply can never steer the shell at a node the operator did not name. |
-| `RoutingMaxHintAge` | Ceiling in milliseconds on how long one learned route is reused (default `5000`). |
+| Any, when `XDG_STATE_HOME` is set | `$XDG_STATE_HOME/camusdb/history.json` |
+| Linux and macOS | `~/.config/camusdb/history.json` |
+| Windows | `%LOCALAPPDATA%\camusdb\history.json` |
 
-A connection string without `RoutingNodes` sends exactly what a pre-routing driver sent. `use
-<database>` and the shell's system-level commands keep every routing key, so routing survives a
-database switch.
+Only your user can read the directory and the file. The file keeps the last 2,000 statements. The
+shell loads the file at start and saves it when you exit or press `Ctrl+C`. If you run the same
+statement two times in sequence, the shell keeps it one time.
+
+A statement that has a password in it (`create user … identified by '…'`, `alter user …`) does
+not go into the file. You can get it back with `Up` until the session ends.
+
+Use `--no-history` to not use the file.
 
 ## Backups
 
-`backup` drives the server's **online** backup and point-in-time-recovery administration: taking
-backups, listing the catalog, resolving a restore chain, and running retention. All of it is safe
-while the server serves traffic.
+The `backup` commands are shell commands. They use the backup API of the server:
 
 ```text
 backup full                            take a full backup
-backup incremental <parent-backup-id>  chain an incremental onto a backup
-backup coordinated                     take a cluster-wide consistent backup
-backup list                            list the node's backup catalog
-backup chain <leaf-backup-id>          resolve and validate a restore chain
-backup gc preview                      report what retention would reclaim
+backup incremental <parent-backup-id>  add an incremental backup to a chain
+backup coordinated                     take a backup of the full cluster at one point
+backup list                            list the backups of the node
+backup chain <leaf-backup-id>          find and check a restore chain
+backup gc preview                      show what retention would delete
 backup gc                              run retention now
 ```
 
-`backup` on its own (or `backup help`) prints that list.
-
-A typical session — take a full backup, chain an incremental onto it, then check the chain would
-actually restore:
+`backup` alone, or `backup help`, shows this list.
 
 ```text
 camus> backup full
@@ -748,434 +618,92 @@ camus> backup incremental 971a0a88-3d36-42c6-b36b-8d1e773f40c4
 camus> backup chain 719b7b6b-281d-4979-bf63-b495a7d1bdaf
 ```
 
-`backup chain` is the validating read: a chain that could not be assembled is rejected here rather
-than at restore time, so it doubles as a "would this backup actually restore?" check. It prints the
-chain root-first and, underneath, the **recoverable window** a point-in-time restore may target —
-the server reports that window for the whole chain on its root, not on the leaf.
+How to use the commands from the shell:
 
-Things worth knowing:
+- The commands do not need a current database.
+- The commands work at the prompt only. They do not work in `--tui`.
+- The backup API uses HTTP only. With the default connection, the shell sends backup requests to
+  `http://localhost:5095`. With `-c`, it uses the `Endpoint` of the connection string. If you set
+  `Protocol=grpc` in `-c`, add `BackupEndpoint=` with the HTTP endpoint of the server.
+- `backup coordinated` must go to the coordinator node. If `Endpoint` has more than one node, set
+  `BackupEndpoint=` to the coordinator.
+- Backup requests have their own timeout. Set it with `BackupTimeout=` (in seconds) in the
+  connection string. The default is 300 seconds.
+- If the server has authentication on, connect as a superuser.
 
-- **Backups are node-wide, not per-database.** Every database on a CamusDB server shares one storage
-  node, so a backup captures all of them at once. Nothing here is scoped to the current database, and
-  the commands work with no database selected.
-- **The server must opt in.** Backups are off until `kahuna.backup_dir` is set in the server's
-  `config.yml`; until then every command fails with `BackupNotConfigured` (HTTP 503).
-- **Superuser only.** With authentication enabled, every command needs a superuser — connect with
-  `-u`/`--token` as one. With authentication *disabled* the server restricts this surface to loopback
-  callers, so a remote shell is refused rather than allowed to take an anonymous node-wide backup.
-- **An incremental can silently become a full.** If the parent has aged past the retention floor the
-  server takes a full backup instead; the command still succeeds and reports the substitution and its
-  reason in yellow.
-- **`backup coordinated` must reach the coordinator.** Another node refuses with
-  `BackupNotCoordinator`. Pin `BackupEndpoint=` to the coordinator when `Endpoint=` is a multi-node
-  pool.
-- **The API is REST-only.** It has no SQL form and no gRPC service. The shell points its default gRPC
-  connection at the well-known HTTP port for you; against a `-c` connection string with an explicit
-  `Protocol=grpc`, add `BackupEndpoint=` naming the server's HTTP endpoint.
-- **Backup requests use their own timeout** — `BackupTimeout=` in the connection string, 300 seconds
-  by default, rather than the statement timeout, since a full backup copies a whole node's base image.
+The shell cannot restore a backup. For the server setup, retention and restore, see
+[Backup and Restore](https://camusdb.github.io/docs/backup-and-restore/).
 
-Retention runs automatically after each backup and on a periodic tick, so `backup gc` is only needed
-to reclaim space immediately after tightening the limits. Preview it first — the preview deletes
-nothing and reports what the configured limits would drop:
+## Workloads
+
+`camus-cli workload` creates sample data and puts load on a server. Use it to try CamusDB or to
+measure it:
 
 ```text
-camus> backup gc preview
-Retention preview: 2 backups, 0 orphans, 1.41 GB would reclaim (00:00:00.041)
+camus-cli workload init <bank|northwind|factory|tpcc|tpcb> [options]
+camus-cli workload run  <bank|northwind|factory|tpcc|tpcb> [options]
 ```
 
-**Restore is not here.** A restore rebuilds into a *fresh* data root, after which the server is
-stopped and a new one booted against it — there is no hot in-place restore, so it stays an operator
-runbook step rather than something the shell can drive to completion. See the server's
-`backups-and-point-in-time-recovery` guide.
-
-## Syntax Coloring
-
-The interactive editor colors SQL keywords, shell commands, constants, numbers, quoted strings,
-and supported function names. Each group gets its own color.
-
-The word lists follow the server's grammar, so every word a statement gives a meaning is colored.
-Some of those words are plain identifiers to the parser rather than reserved keywords, so they stay
-usable as table and column names; the editor colors them because they read as part of a statement.
-
-## Autocompletion
-
-Press `Tab` to autocomplete the word under the cursor; press it again to cycle through
-matches, and `Ctrl+Tab` to cycle backwards.
-
-Completion is context-aware. When the word being typed follows a keyword that expects a
-table or view name — `from`, `into`, `update`, `join`, `table`, `view`, `desc`,
-`describe`, `truncate`, or `references` — the shell suggests the **table and view names** of the current
-database. In
-any other position it suggests the SQL keywords, functions, and shell commands.
-
-The `for` of `show statistics for` counts as a table position too, decided by the word
-before it: `show grants for` takes a user name, so `for` alone is not enough.
-
-The `index` of `show ranges from index` takes a **qualified** `table@index` name, which the
-editor treats as one word. Before the `@` the shell suggests table names; after it, the index
-names of that table, loaded from `show indexes from <table>` on the first `Tab` that asks for
-them. A press that arrives before the load answers completes nothing; the next one completes
-from the cache.
-
-```sql
-select * from us⇥              -- completes to a table such as "users"
-insert into ⇥                  -- cycles through all table names
-city string(80) references ⇥   -- cycles through all table names
-show statistics for ⇥          -- cycles through all table names
-show ranges from table ⇥       -- cycles through all table names
-show ranges from index us⇥     -- completes the table half, such as "users"
-show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
-drop sequence ⇥               -- cycles through all sequence names
-sel⇥                           -- completes to "select"
-```
-
-After `sequence`, the shell suggests the **sequence names** of the current database. This applies
-to `alter sequence`, `drop sequence`, `show create sequence` and `comment on sequence`. After
-`create sequence`, the shell suggests nothing, because that statement names a new sequence.
-
-Relation names are loaded from `show tables`, `show views` and `show materialized views`,
-and sequence names from `show sequences`. They are refreshed automatically on startup, after a
-`use <database>` switch, and after a statement that changes the set of relations or sequences
-(`create`/`drop table`, `create [or replace]`/`drop`/`alter view`, their materialized forms,
-and `create`/`drop`/`alter`/`comment on sequence`). Each of those refreshes also
-drops the cached index names, because an index belongs to one table in one database. Index DDL
-(`create [unique] index`, `drop index`, `alter table`) drops them on its own. This includes
-`alter table … add constraint … foreign key` and `drop constraint`, which can create and drop the
-constraint's own `~fk_<constraint>` index on the child table.
-
-## Function Examples
-
-ID:
-
-```sql
-insert into users (id, name) values (gen_id(), 'Grace Hopper');
-```
-
-Date and time:
-
-```sql
-select current_timestamp(), now(), current_date();
-select date_add(current_timestamp(), 7, 'day');
-select date_diff('2026-01-01T00:00:00Z', current_timestamp(), 'day');
-select date_part('year', current_timestamp());
-select date_trunc('day', current_timestamp());
-select unix_timestamp(), from_unixtime(1767225600);
-```
-
-Math:
-
-```sql
-select abs(-10), ceil(1.2), floor(1.8), round(1.234, 2);
-select sqrt(16), pow(2, 8), mod(10, 3), sign(-42), random();
-```
-
-Strings:
-
-```sql
-select length(name), lower(name), upper(name), trim(name) from users;
-select substring(name, 1, 3), replace(name, 'Ada', 'A.') from users;
-select contains(name, 'Ada'), starts_with(name, 'A'), ends_with(name, 'e') from users;
-select concat(first_name, ' ', last_name) from users;
-```
-
-JSON:
-
-```sql
-select json_valid(payload), json_type(payload) from events;
-select json_extract(payload, '$.user.id'), json_value(payload, '$.user.name') from events;
-select json_contains(payload, '{"active":true}'), json_array_length(payload, '$.items') from events;
-```
-
-Casting:
-
-```sql
-select cast(score as integer) from scores;
-select to_string(score), to_int64(score), to_float64(score), to_bool(active), to_id(id_text) from scores;
-```
-
-Sequences:
-
-```sql
-create sequence order_no start with 1000 cache 1;
-create table orders (id oid primary key, no int64 default(nextval('order_no')), total float64);
-create table tickets (id oid primary key, n int64 generated always as identity, subject string);
-select nextval('order_no'), currval('order_no'), lastval();
-select setval('order_no', 5000);
-alter sequence order_no restart with 500;
-show sequences like 'order%';
-truncate table tickets restart identity;
-```
-
-`currval` and `lastval` report the last value that **this transaction** drew. Outside a
-transaction, each statement is its own transaction, so run the `nextval` and the `currval` in
-one `begin`/`commit` block. A `setval` and an `alter sequence … restart` take about five seconds,
-because the server waits for one storage lease before it reports success. The shell waits up to
-60 seconds for a statement, so this delay does not cause a timeout.
-
-Insert … returning:
-
-```sql
-insert into orders (total) values (10.5), (20) returning id, no, total * 2 as doubled;
-insert into orders (total) values (99) returning *\G
-insert into archive select * from orders where total > 100 returning id;
-```
-
-The shell shows the RETURNING rows as a table, as it does for a `select`, and then the
-inserted-row count. `\G` shows the rows vertically. The rows show the stored values, so they
-include defaults and the values that a sequence or `gen_id()` gave. An `insert … select` that
-inserts no rows shows no table and `0 rows affected`. In `--tui`, the rows go to the result grid.
-
-`returning` is a reserved word, so a column or a table called `returning` needs backticks. The
-server demands the `select` privilege on the table, in addition to `insert`. Over gRPC, the server
-refuses a RETURNING result larger than about 4 MiB with `CADB0550`, and it rolls the insert back.
-`update … returning` and
-`delete … returning` are not available.
-
-Foreign keys:
-
-```sql
-create table cities (name string(80) not null, population int64, primary key (name));
-create table weather (
-    id   oid not null default (gen_id()),
-    city string(80) references cities (name),
-    temp_lo int64,
-    primary key (id)
-);
-insert into weather (city, temp_lo) values ('Berkeley', 45);   -- CADB0304: no such city
-
-create table employees (id int64 not null, manager_id int64 references employees, primary key (id));
-
-alter table weather drop constraint weather_city_fkey;
-alter table weather add constraint weather_city_fk foreign key (city)
-    references cities (name) on delete restrict on update no action;
-show create table weather;
-```
-
-The server accepts `no action` (the default) and `restrict` for `on delete` and `on update`. It
-refuses `cascade`, `set null`, `set default`, `match full`, `match partial`, `deferrable` and
-`initially deferred` with `CADB0533`. A violation fails with `CADB0304` (no parent),
-`CADB0305` (a delete of a referenced key) or `CADB0306` (an update of a referenced key). The
-server rolls back the whole transaction after a violation, and the shell clears its transaction
-state, as it does for any failed statement in a transaction.
-
-Without a usable index on the referencing columns, the server creates one named
-`~fk_<constraint>`. `show indexes from <table>` lists it, and the `show ranges from index`
-completion offers it. A drop of a table that another table references fails with `CADB0530`.
-Drop the child table, or its constraint, first. Also, `drop constraint` of a foreign key does
-not complete constraint names, because the shell does not load them.
-
-Vectors:
-
-```sql
-select octet_length(embedding), vector_dims(embedding) from docs;
-select id, l2_distance(embedding, 0x0000803F0000004000004040) as distance
-from docs order by distance limit 10;
-select id from docs order by cosine_distance(embedding, 0x0000803F0000004000004040) limit 10;
-select id from docs order by inner_product(embedding, 0x0000803F0000004000004040) desc limit 10;
-```
-
-A vector is a `bytes` value. It holds tightly packed little-endian float32 elements and carries no
-header, so `vector_dims` is the byte count divided by four. The hex literal above is the
-three-element vector `[1.0, 2.0, 3.0]`. `octet_length` also accepts a string, where it counts UTF-8
-bytes rather than characters.
-
-The three distance functions take two vectors of equal size and return a `float64`. `l2_distance`
-and `cosine_distance` put the nearest row first with `asc`, which is the default. `inner_product`
-runs the other way: the largest value is the most similar, so it needs `desc`. An ascending
-`inner_product` returns the least similar rows, and it reports no error.
-
-A `bytes(N)` column declares a maximum length, never an exact one. A `check` over `vector_dims` is
-what pins the dimension:
-
-```sql
-create table docs (
-  id        object_id primary key,
-  embedding bytes(3072) not null,
-  constraint embedding_is_768d check (vector_dims(embedding) = 768)
-);
-```
-
-The shell has no bind parameters, so a query vector must be typed as a hex literal. A 768-element
-vector is about 6 KB of text. For that size, use a client that binds the vector as a parameter.
-
-## Script Files
-
-Use `source` to execute a file containing one or more SQL statements:
-
-```sql
-source ./seed.sql
-```
-
-Example `seed.sql`:
-
-```sql
-create table users (
-  id object_id primary key,
-  name string not null,
-  active bool default true
-);
-
-insert into users (id, name, active)
-values (gen_id(), 'Ada Lovelace', true);
-
-select * from users;
-```
-
-The file is streamed rather than read into memory, so a dump larger than RAM sources fine and the
-first statement runs immediately instead of after the whole file has been parsed.
-
-Statements are split on semicolons, ignoring any that fall inside `'strings'`, `"strings"`,
-`` `quoted identifiers` ``, `-- line comments`, `# line comments`, or `/* block comments */`.
-Doubled quotes (`'it''s'`) and backslash escapes (`'it\'s'`) are understood, and comments are
-stripped before a statement is sent to the server.
-
-Execution stops at the first statement that fails, reporting the file and the line the statement
-started on. Pass `--force` to carry on instead and print a summary at the end:
-
-```sql
-source ./seed.sql --force
-```
-
-An open transaction stops the file either way: the server has already aborted it, so every
-remaining statement would fail too.
-
-A file may contain `use` statements to switch databases as it goes; a `use` inside an open
-transaction is refused and stops the file, since the rest of it would otherwise run against the
-wrong database.
-
-## Output
-
-Queries are printed as Spectre.Console tables:
-
-```text
-+----+------+
-| id | name |
-+----+------+
-| 1  | Ada  |
-+----+------+
-1 rows in set (00:00:00.0123456)
-```
-
-DDL and non-query statements print affected row counts:
-
-```text
-Query OK, 1 rows affected (00:00:00.0123456)
-```
-
-Errors are printed with the exception type and message.
-
-### Vertical Output (`\G`)
-
-Terminate a statement with `\G` instead of `;` to print each row vertically, one column per
-line. This is useful for wide rows or rows with long values.
-
-```sql
-select * from users\G
-```
-
-```text
-*************************** 1. row ***************************
-  id: 1
-name: Ada
-2 rows in set (00:00:00.0123456)
-```
-
-`\G` works anywhere `;` does, including inside `source` script files and in multi-statement
-batches (`select 1; select 2\G`).
-
-## Development
-
-Build the CLI:
+`init` creates the schema and the data. `run` runs the workload until the duration ends.
+
+| Option | Description |
+| --- | --- |
+| `-c`, `--connection-source` | A connection string. The default is the same as for the shell. |
+| `--database` | The target database. The default is `demo`. |
+| `--rows N` | The number of rows that `init` makes. For `bank` and `tpcb` it is accounts, and for `tpcc` it is warehouses. The default is 1000. |
+| `--concurrency N` | The number of parallel workers for `run`, and of parallel writers for `init`. The default is 64. |
+| `--duration N` | The duration of `run`, in seconds. The default is 60. |
+| `--locking MODE` | `optimistic` or `pessimistic`. The default is `optimistic`. |
+| `--isolation LEVEL` | `serializable` or `read-committed`. The default is `serializable`. |
+| `--no-prepare` | Run each statement inline, not prepared. |
+| `-u`, `-p`, `--allow-insecure-credentials` | The same as for the shell. |
 
 ```shell
-dotnet build CamusDb.SqlSh/CamusDb.SqlSh.csproj
+camus-cli workload init bank --database demo --rows 5000
+camus-cli workload run northwind --concurrency 5 --duration 120
+camus-cli workload init tpcc --database tpcc --rows 1
+camus-cli workload run tpcc --concurrency 4 --duration 120
 ```
 
-Run the line editor tests:
-
-```shell
-dotnet test Radline/RadLine.Tests/RadLine.Tests.csproj
-```
-
-Create the NuGet package:
-
-```shell
-dotnet pack CamusDb.SqlSh/CamusDb.SqlSh.csproj -c Release
-```
-
-The package is written to:
-
-```text
-CamusDb.SqlSh/nupkg/
-```
-
-Run from source:
-
-```shell
-dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- northwind
-```
-
-Run from source with a connection string:
-
-```shell
-dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- -c "Endpoint=http://localhost:5095;Database=northwind"
-```
+See [Workload Utility](https://camusdb.github.io/docs/workload-utility/) for more.
 
 ## Troubleshooting
 
-The shell connects to `test` when running `camus-cli northwind`.
+### The shell does not exit
 
-Make sure you are running a version that includes database argument support:
+A transaction is open. Run `commit` or `rollback`, then run `exit`.
 
-```shell
-camus-cli -v
-```
+### The connection string is not valid
 
-Then clear caches and update if needed:
-
-```shell
-dotnet nuget locals all --clear
-dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
-```
-
-Connection string validation fails.
-
-Use a connection string with both required fields:
+The connection string must have an `Endpoint` with a full URL, for example:
 
 ```text
 Endpoint=http://localhost:5095;Database=northwind
 ```
 
-The shell will not exit.
+### An old version runs
 
-If a transaction is active, run:
+Look at the version:
 
-```sql
-commit;
+```shell
+camus-cli -v
 ```
 
-or:
+Clear the NuGet caches and update the tool:
 
-```sql
-rollback;
-```
-
-Then run:
-
-```sql
-exit
+```shell
+dotnet nuget locals all --clear
+dotnet tool update --global CamusDB.SqlSh
 ```
 
 ### Terminal Detection
 
-The rich editor (colors, multiline, Tab completion) is only enabled when the terminal
-reports that it supports ANSI, is interactive, and writes to a real terminal. These
-capabilities are detected from the environment — chiefly the `TERM` variable — so some
-capable terminals whose `TERM` value is not on Spectre.Console's recognized list (for
-example Rio, which sets `TERM=rio`) fall back to a plain prompt with none of those features.
+The rich editor (colors, multiline input and Tab completion) needs a terminal that supports ANSI
+and is interactive. The shell finds these capabilities from the environment, mainly from the `TERM`
+variable. Some terminals that support ANSI have a `TERM` value that Spectre.Console does not know.
+For example, Rio sets `TERM=rio`. On these terminals, the shell uses a plain prompt.
 
-Print the detected capabilities to see why:
+Print the capabilities that the shell found:
 
 ```shell
 camus-cli --diagnose-terminal
@@ -1191,19 +719,52 @@ Rich editor disabled (falling back to plain prompt). Terminal capabilities:
   ForceRich   : False
 ```
 
-If the terminal really does support ANSI, force the rich editor:
+If the terminal supports ANSI, force the rich editor:
 
 ```shell
 camus-cli --force-rich
-# or, persistently:
+# or, for all sessions:
 export CAMUS_FORCE_RICH=1
 ```
 
-Alternatively, set a `TERM` value that is recognized (this also helps other terminal
-applications):
+You can also set a `TERM` value that Spectre.Console knows. This also helps other terminal
+programs:
 
 ```shell
 TERM=xterm-256color camus-cli
+```
+
+## Development
+
+Build the shell:
+
+```shell
+dotnet build CamusDb.SqlSh/CamusDb.SqlSh.csproj
+```
+
+Run the line editor tests:
+
+```shell
+dotnet test Radline/RadLine.Tests/RadLine.Tests.csproj
+```
+
+Run from source:
+
+```shell
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- northwind
+dotnet run --project CamusDb.SqlSh/CamusDb.SqlSh.csproj -- -c "Endpoint=http://localhost:5095;Database=northwind"
+```
+
+Make the NuGet package. The package goes into `CamusDb.SqlSh/nupkg/`:
+
+```shell
+dotnet pack CamusDb.SqlSh/CamusDb.SqlSh.csproj -c Release
+```
+
+Install the local package:
+
+```shell
+dotnet tool update --global CamusDB.SqlSh --add-source ./CamusDb.SqlSh/nupkg
 ```
 
 ## License

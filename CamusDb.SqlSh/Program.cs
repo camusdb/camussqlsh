@@ -376,6 +376,10 @@ if (richEditorSupported)
         "uuid",
         "guid",
         "array",
+        // NUMERIC (alias DECIMAL): an exact decimal with precision 38 and scale 9. Both words are
+        // reserved to the parser. NUMERIC also starts the typed literal NUMERIC '1.23'.
+        "numeric",
+        "decimal",
         "is",
         "on",
         "in",
@@ -392,6 +396,13 @@ if (richEditorSupported)
         "group",
         "join",
         "inner",
+        // [INNER] JOIN, LEFT [OUTER] JOIN, RIGHT [OUTER] JOIN and CROSS JOIN. LEFT, RIGHT, OUTER and
+        // CROSS are reserved words to the parser, so a column or a table with one of these names needs
+        // backticks. The server refuses FULL JOIN by name; FULL is listed below for MATCH FULL.
+        "left",
+        "right",
+        "outer",
+        "cross",
         "offset",
         "unique",
         "having",
@@ -594,6 +605,9 @@ if (richEditorSupported)
         "sign",
         "random",
         "round",
+        // trunc(x[, n]) cuts a value toward zero at n fraction digits, where round rounds. A NUMERIC
+        // stays NUMERIC and is cut exactly.
+        "trunc",
         "length",
         "lower",
         "upper",
@@ -1803,6 +1817,9 @@ static string FormatValue(ColumnValue value)
         ColumnType.String => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!) : "",
         ColumnType.Integer64 => value.LongValue.ToString(CultureInfo.InvariantCulture),
         ColumnType.Float64 or ColumnType.Float32 => value.FloatValue.ToString(CultureInfo.InvariantCulture),
+        // The server sends the canonical decimal text, which can hold more digits than a decimal or
+        // a double. It is shown as it arrives, so no digit is lost.
+        ColumnType.Numeric => value.StrValue ?? "",
         ColumnType.Bool => value.BoolValue.ToString(),
         ColumnType.Uuid => FormatUuid(value),
         // The server sends a date as yyyy-MM-dd and a datetime in round-trip form, and that text is
@@ -2131,7 +2148,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("       camus-cli workload <init|run> <bank|northwind|factory|tpcc|tpcb> [[options]]");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Options:[/]");
-    AnsiConsole.MarkupLine("  database                      Database name to connect to (default: test)");
+    AnsiConsole.MarkupLine("  database                      Database to use at start (default: none; select one with");
+    AnsiConsole.MarkupLine("                                [cyan]use <database>[/])");
     AnsiConsole.MarkupLine("  -c, --connection-source       Connection string (default: gRPC on http://localhost:5096,");
     AnsiConsole.MarkupLine("                                falling back to REST on http://localhost:5095)");
     AnsiConsole.MarkupLine("  -e, --execute                 Execute a SQL statement (or ;-separated statements) and exit");

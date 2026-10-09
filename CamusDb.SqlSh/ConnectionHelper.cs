@@ -31,7 +31,7 @@ internal static class ConnectionHelper
     /// <summary>
     /// Copies the reader's current row into a dictionary keyed by column name.
     ///
-    /// <para>Each cell is taken as the driver holds it, so every one of the twelve
+    /// <para>Each cell is taken as the driver holds it, so every one of the thirteen
     /// <see cref="ColumnType"/> members arrives with its own backing field. A per-type rebuild
     /// through the reader's typed accessors cannot do that: it has no branch for
     /// <see cref="ColumnType.Bytes"/>, <see cref="ColumnType.Date"/>,
