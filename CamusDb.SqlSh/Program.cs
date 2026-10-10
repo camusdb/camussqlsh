@@ -499,6 +499,12 @@ if (richEditorSupported)
         // names; the editor colors them because they read as part of the SHOW vocabulary.
         "slow",
         "queries",
+        // SHOW [CLUSTER] QUERIES, SHOW [CLUSTER] CONNECTIONS and CANCEL QUERY '<query_id>': the
+        // statements and client connections a node serves now, and the stop for one running read.
+        // None of the words is reserved, so all of them stay usable as table and column names.
+        "connections",
+        "cancel",
+        "query",
         // SET/RESET CLUSTER SETTING and SHOW CLUSTER SETTINGS. Both spellings of the last word are
         // listed because the statements differ: SETTING for the mutations, SETTINGS for the listing.
         "cluster",
@@ -2234,6 +2240,16 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                What [white]this node[/] recorded over its slow-query threshold,");
     AnsiConsole.MarkupLine("                                newest first. Off by default, and lost on restart;");
     AnsiConsole.MarkupLine("                                fourteen columns, so append [cyan]\\G[/] for vertical output");
+    AnsiConsole.WriteLine();
+    AnsiConsole.MarkupLine("[bold]Running statements:[/] [grey58](SQL, not shell commands; each runs without a current database)[/]");
+    AnsiConsole.MarkupLine("  [cyan]show[/] [[[cyan]cluster[/]]] [cyan]queries[/] [[like '<pattern>']]");
+    AnsiConsole.MarkupLine("                                The statements that run now on [white]this node[/], or on");
+    AnsiConsole.MarkupLine("                                every node with [cyan]cluster[/]. Append [cyan]\\G[/] for vertical output");
+    AnsiConsole.MarkupLine("  [cyan]show[/] [[[cyan]cluster[/]]] [cyan]connections[/]");
+    AnsiConsole.MarkupLine("                                The client connections that [white]this node[/], or every");
+    AnsiConsole.MarkupLine("                                node with [cyan]cluster[/], holds open now");
+    AnsiConsole.MarkupLine("  [cyan]cancel query[/] '<query_id>'     Stop a running read on any node. A write or a");
+    AnsiConsole.MarkupLine("                                schema change cannot be stopped");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Examples:[/]");
     AnsiConsole.MarkupLine("  camus-cli mydb");

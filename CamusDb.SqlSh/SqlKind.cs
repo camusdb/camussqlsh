@@ -258,6 +258,15 @@ internal static class SqlKind
                // prefix is matched by words: the single-space StartsWith spelling would miss
                // `SHOW  SLOW QUERIES` and send it down the needs-a-database path.
                StartsWithWords(trimmedSql, "show", "slow", "queries") ||
+               // The statements and client connections this node, or every node of the cluster, serves
+               // now. They read the node's own activity lists, not a database, so they run on the
+               // endpoint connection. QUERIES and CONNECTIONS are plain identifiers to the parser, so
+               // the prefixes are matched by words. SHOW CLUSTER SETTINGS below shares the CLUSTER word
+               // but not the noun, so the three forms cannot match each other.
+               StartsWithWords(trimmedSql, "show", "queries") ||
+               StartsWithWords(trimmedSql, "show", "cluster", "queries") ||
+               StartsWithWords(trimmedSql, "show", "connections") ||
+               StartsWithWords(trimmedSql, "show", "cluster", "connections") ||
                // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
                // it runs on the endpoint connection and answers in a session that never ran `use`.
                StartsWithWords(trimmedSql, "show", "cluster", "settings") ||
@@ -289,10 +298,19 @@ internal static class SqlKind
     }
 
     // Everything the server dispatches before opening a database — database lifecycle DDL, user and
-    // grant administration, plus runtime cluster settings.
+    // grant administration, runtime cluster settings, plus CANCEL QUERY.
     internal static bool IsServerLevelDDL(string sql)
     {
-        return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql);
+        return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql) || IsCancelQuery(sql);
+    }
+
+    // CANCEL QUERY '<query_id>' stops a statement on this node's running-statement list, or forwards
+    // the cancel to the node the id names. It names no database, opens no transaction and returns no
+    // rows, so it runs on a database-less connection, outside the shell's open transaction. CANCEL
+    // and QUERY are plain identifiers to the parser, so the prefix is matched by words.
+    internal static bool IsCancelQuery(string sql)
+    {
+        return StartsWithWords(sql, "cancel", "query");
     }
 
     // Runtime cluster settings are server-level for the same reasons user administration is: the key is
