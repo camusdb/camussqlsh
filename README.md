@@ -128,6 +128,7 @@ camus-cli workload <init|run> <bank|northwind|factory|tpcc|tpcb> [options]
 | `-c`, `--connection-source` | A full connection string. It must have `Endpoint`. |
 | `-e`, `--execute` | Run the given SQL and exit. See [Non-Interactive Execution](#non-interactive-execution). |
 | `-f`, `--file` | Run the statements in a `.sql` file and exit. The shell stops at the first error. Use `-f -` to read standard input. See [Running a .sql File](#running-a-sql-file). |
+| `--format` | How `-e` and `-f` show rows: `table` (default), `json` or `yaml`. See [JSON and YAML Output](#json-and-yaml-output). |
 | `-u`, `--user` | The user to authenticate as. See [Authentication](#authentication). |
 | `-p`, `--password` | The password of that user. Give `-p` with no value to get a prompt. |
 | `--token` | Use a bearer token instead of a user and a password. |
@@ -491,6 +492,49 @@ You can use `-f` and `-e` together. The file runs first:
 ```shell
 camus-cli demo -f seed.sql -e "select count(*) from users"
 ```
+
+### JSON and YAML Output
+
+Use `--format json` or `--format yaml` with `-e` or `-f` to get rows that another program can
+read:
+
+```shell
+camus-cli demo -e "select id, name from users" --format json | jq '.[].name'
+camus-cli demo -e "select id, name from users" --format yaml > users.yaml
+```
+
+```json
+[
+  {
+    "id": 1,
+    "name": "Ada"
+  }
+]
+```
+
+With these formats, standard output contains only the rows. The shell does not print the version
+banner. It writes the `rows in set` and `Query OK` lines and errors to standard error. A statement that fails still
+makes the process exit with status `1`.
+
+Each statement that returns rows gives one document. A JSON document is an array of objects. A
+YAML document is a sequence of mappings, and `---` separates two documents. A query with no rows
+gives an empty array (`[]`). A statement that returns no rows, such as `create table`, gives no
+document.
+
+The values keep their types:
+
+| SQL type | JSON | YAML |
+| --- | --- | --- |
+| `int64`, `float32`, `float64` | number | number |
+| `bool` | `true` or `false` | `true` or `false` |
+| `null` | `null` | `null` |
+| `numeric` | string, so that no digit is lost | string |
+| `string`, `uuid`, `date`, `timestamp` | string | string |
+| `bytes` | base64 string, not clipped | `!!binary` |
+| `array` | array | flow sequence (`[1, 2, 3]`) |
+
+`\G` has no effect with these formats. The interactive shell and `--tui` always show tables, so
+`--format json` and `--format yaml` without `-e` or `-f` is an error.
 
 ## Script Files
 

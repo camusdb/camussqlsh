@@ -27,7 +27,10 @@ string version = informationalVersion?.Split('+')[0]
     ?? Assembly.GetExecutingAssembly().GetName().Version?.ToString(3)
     ?? "unknown";
 
-Console.WriteLine($"CamusDB SQL Shell {version}\n");
+// --format json|yaml promises a stdout that a parser can read, so the banner cannot go there. The
+// option parser runs later, so the raw arguments are read here.
+if (!RequestsStructuredOutput(args))
+    Console.WriteLine($"CamusDB SQL Shell {version}\n");
 
 int workloadIdx = Array.FindIndex(args, a => string.Equals(a, "workload", StringComparison.OrdinalIgnoreCase));
 if (workloadIdx >= 0)
@@ -91,6 +94,31 @@ if (!string.IsNullOrEmpty(opts.Password))
 // pipe works the same as a file on disk.
 bool readScriptFromStdin = opts.File == "-";
 bool nonInteractive = !string.IsNullOrWhiteSpace(opts.Execute) || !string.IsNullOrWhiteSpace(opts.File);
+
+if (!StructuredResultWriter.TryParse(opts.Format, out OutputFormat outputFormat))
+{
+    Console.Error.WriteLine($"Unknown --format '{opts.Format}'. Use table, json or yaml.");
+    Environment.ExitCode = 1;
+    return;
+}
+
+// JSON and YAML are for a program that reads stdout, so only -e and -f print them. Every other line
+// the shell writes (the "rows in set" footer, "Query OK", an error) goes to stderr through
+// AnsiConsole, and stdout carries the documents only.
+if (outputFormat != OutputFormat.Table)
+{
+    if (!nonInteractive)
+    {
+        Console.Error.WriteLine("--format json and --format yaml need -e or -f.");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    AnsiConsole.Console = AnsiConsole.Create(new AnsiConsoleSettings
+    {
+        Out = new AnsiConsoleOutput(Console.Error),
+    });
+}
 
 // Checked before connecting: a typo in the path shouldn't cost a round trip or look like a
 // server problem.
@@ -241,6 +269,11 @@ SqlCompletion? sqlCompletion = null;
 // The TUI colors its editor pane with the same word list as the line editor, so the
 // highlighter built below is kept where both can reach it.
 WordHighlighter? sharedHighlighter = null;
+
+// Set only for --format json|yaml, which is refused above outside -e and -f.
+StructuredResultWriter? structuredWriter = outputFormat == OutputFormat.Table
+    ? null
+    : new StructuredResultWriter(outputFormat, Console.OpenStandardOutput());
 
 // Non-interactive mode: run the supplied SQL, then exit. A failure here has no prompt to return
 // to, so report it the way the interactive loop does — a diagnosable line, not a stack trace —
@@ -1380,9 +1413,13 @@ async Task ExecuteInsert(CamusConnection connection, string sql, bool vertical)
 }
 
 // Writes every row of `reader` as one table, or as one vertical block per row for \G, and returns
-// the row count. Writes nothing when the reader has no rows.
+// the row count. Writes nothing when the reader has no rows. With --format json|yaml, the rows go to
+// stdout as one document instead, and \G has no effect.
 async Task<int> WriteRows(CamusDataReader reader, bool vertical)
 {
+    if (structuredWriter is not null)
+        return await structuredWriter.WriteAsync(reader);
+
     int rows = 0;
     Table? table = null;
 
@@ -2161,6 +2198,9 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -e, --execute                 Execute a SQL statement (or ;-separated statements) and exit");
     AnsiConsole.MarkupLine("  -f, --file                    Execute the statements in a .sql file and exit; stops at the");
     AnsiConsole.MarkupLine("                                first error. Use [cyan]-f -[/] to read the script from standard input");
+    AnsiConsole.MarkupLine("  --format                      How [cyan]-e[/] and [cyan]-f[/] print rows: table (default), json or yaml.");
+    AnsiConsole.MarkupLine("                                With json or yaml, stdout carries only the rows; status");
+    AnsiConsole.MarkupLine("                                lines and errors go to stderr");
     AnsiConsole.MarkupLine("  -u, --user                    User to authenticate as (only needed on a server with");
     AnsiConsole.MarkupLine("                                authentication enabled)");
     AnsiConsole.MarkupLine("  -p, --password                That user's password. Give [cyan]-p[/] with no value to be prompted");
@@ -2257,6 +2297,7 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
     AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
     AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\" --format json | jq '.[[]].name'");
     AnsiConsole.MarkupLine("  camus-cli mydb -f schema.sql");
     AnsiConsole.MarkupLine("  cat schema.sql | camus-cli mydb -f -");
     AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
@@ -2303,6 +2344,23 @@ static bool ConsumeFlag(ref string[] args, string flag)
         args = [.. args.Where(a => !string.Equals(a, flag, StringComparison.OrdinalIgnoreCase))];
 
     return present;
+}
+
+// True when argv asks for --format json or --format yaml, in either the "--format x" or the
+// "--format=x" spelling. Only the banner needs this before the option parser runs.
+static bool RequestsStructuredOutput(string[] args)
+{
+    for (int i = 0; i < args.Length; i++)
+    {
+        string? value = args[i] == "--format" && i + 1 < args.Length
+            ? args[i + 1]
+            : args[i].StartsWith("--format=", StringComparison.Ordinal) ? args[i]["--format=".Length..] : null;
+
+        if (StructuredResultWriter.TryParse(value, out OutputFormat format) && format != OutputFormat.Table)
+            return true;
+    }
+
+    return false;
 }
 
 static bool IsTruthy(string? value)
@@ -2602,6 +2660,9 @@ public sealed class Options
 
     [Option("token", Required = false, HelpText = "Use a bearer token obtained elsewhere instead of logging in")]
     public string? AccessToken { get; set; }
+
+    [Option("format", Required = false, HelpText = "How -e and -f print rows: table (default), json or yaml")]
+    public string? Format { get; set; }
 
     [Option("no-history", Required = false, HelpText = "Do not load or save the statement history")]
     public bool NoHistory { get; set; }
