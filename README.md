@@ -185,6 +185,7 @@ The shell runs these commands itself. It does not send them to the server.
 | `use <database>` | Make `<database>` the current database. |
 | `source <file> [--force]` | Run the statements in a file. See [Script Files](#script-files). |
 | `show prepared [sql]` | Show the statements that the driver keeps prepared. See [Prepared statements](#prepared-statements). |
+| `\plan [flow\|table]` | Set how `EXPLAIN` shows a plan. See [Query Plans](#query-plans-explain). |
 | `backup …` | Take and manage backups. See [Backups](#backups). |
 | `clear` | Clear the screen. |
 | `exit`, `quit` | Leave the shell. |
@@ -613,6 +614,58 @@ name: Ada
 
 `\G` works at the prompt, in `source` files, with `-e` and with `-f`. It also works in a list of
 statements (`select 1; select 2\G`).
+
+### Query Plans (`EXPLAIN`)
+
+The shell shows the result of `EXPLAIN` as a flow. The source is at the top, and the result is at
+the bottom. Each operator is a box in the color of its family: source, join, filter, aggregate,
+sort, limit or output. An arrow between two boxes shows the number of rows that the upper operator
+produces:
+
+```text
+ physical  · 2 operators · estimated cost 720 · rows flow from top to bottom
+
+╭─ SOURCE ─────────────────────────────────────────────────────────────────╮
+│ table-scan  title  Highest cost                                          │
+│ Reads every row of the table.                                            │
+│ table=title                                                              │
+│ est. cost 600 (83%)                                                      │
+│ ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━──────────── │
+╰──────────────────────────────────────────────────────────────────────────╯
+                                      │ est. 60 rows
+                                      ▼
+╭─ JOIN ───────────────────────────────────────────────────────────────────╮    ┌┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┐
+│ index-nested-loop-join                                                   │ ◀╌╌┆ Right input                ┆
+│ For each left row, finds the matching right rows through an index.       │    ┆ looked up in index         ┆
+│ on=ci.movie_id = t.id, index=movie_id_cast_info, left=t.id,              │    ┆ movie_id_cast_info         ┆
+│ right=movie_id                                                           │    └┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┘
+│ est. cost 120 (17%)                                                      │
+│ ━━━━━━━━━━━━──────────────────────────────────────────────────────────── │
+╰──────────────────────────────────────────────────────────────────────────╯
+                                      │ est. 60 rows
+                                      ▼
+                                  ╭────────╮
+                                  │ Result │
+                                  ╰────────╯
+
+Plan info  shape=ddea1051bfce4953, schema-deps=[1@0, 7@0]
+3 rows in set (00:00:00.0211825)
+```
+
+- A bar under each operator shows its part of the estimated cost of the plan. `Highest cost`
+  marks the operator that costs more than each of the others.
+- The second input of a join has no row in the plan. A dashed box beside the join shows what the
+  plan tells about it. On a narrow terminal, this information is a line in the box of the join.
+- With `EXPLAIN (ANALYZE)`, an arrow shows the measured rows and the estimate. Each operator also
+  shows its storage counters. `Estimate off Nx` marks an operator whose measured rows are 10 times
+  the estimate, or one tenth of it.
+
+Use `\plan table` to show the rows of the plan as a table. Use `\plan flow` to show the flow again.
+`\plan` without an argument shows the current setting. The setting stays until the shell exits.
+The command works at the prompt, in `source` files, with `-e` and with `-f`.
+
+`\G` and `--format json|yaml` always show the rows of the plan. The `--tui` mode also shows the
+rows.
 
 ## History
 

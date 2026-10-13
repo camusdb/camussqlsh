@@ -275,6 +275,10 @@ StructuredResultWriter? structuredWriter = outputFormat == OutputFormat.Table
     ? null
     : new StructuredResultWriter(outputFormat, Console.OpenStandardOutput());
 
+// How EXPLAIN shows a plan in table output: as a flow from the source to the result, or as the
+// plain rows. `\plan flow` and `\plan table` change it for the rest of the session.
+bool planAsFlow = true;
+
 // Non-interactive mode: run the supplied SQL, then exit. A failure here has no prompt to return
 // to, so report it the way the interactive loop does — a diagnosable line, not a stack trace —
 // and exit non-zero so a caller can tell the statement didn't run.
@@ -1172,6 +1176,14 @@ async Task ExecuteStatement(string sql, bool vertical)
         return;
     }
 
+    // The plan view is the shell's, not the server's. It is handled here, so a script file and -e can
+    // switch it too, and before the no-database check, because it needs no database.
+    if (IsPlanViewCommand(sql, out string planViewArguments))
+    {
+        SetPlanView(planViewArguments);
+        return;
+    }
+
     bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
     if (needsDb && !HasDatabase(activeConnectionString))
     {
@@ -1384,9 +1396,35 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
 
     TimeSpan duration = stopwatch.Elapsed;
 
-    int rows = await WriteRows(reader, vertical);
+    // \G and --format json|yaml ask for the rows themselves, so only the table output draws the flow.
+    int rows = planAsFlow && !vertical && structuredWriter is null && IsExplain(sql)
+        ? await WritePlan(reader)
+        : await WriteRows(reader, vertical);
 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
+}
+
+// Handles `\plan`, `\plan flow` and `\plan table`. With no argument, it tells which view is on.
+void SetPlanView(string argument)
+{
+    if (argument.Length == 0)
+    {
+        AnsiConsole.MarkupLine("EXPLAIN shows the plan as [cyan]{0}[/]. Use [cyan]\\plan flow[/] or [cyan]\\plan table[/] to change it.\n",
+            planAsFlow ? "a flow" : "a table");
+        return;
+    }
+
+    if (argument.Equals("flow", StringComparison.InvariantCultureIgnoreCase))
+        planAsFlow = true;
+    else if (argument.Equals("table", StringComparison.InvariantCultureIgnoreCase))
+        planAsFlow = false;
+    else
+    {
+        AnsiConsole.MarkupLine("[red]Usage: \\plan [[flow|table]][/]\n");
+        return;
+    }
+
+    AnsiConsole.MarkupLine("EXPLAIN now shows the plan as [cyan]{0}[/].\n", planAsFlow ? "a flow" : "a table");
 }
 
 // Runs an INSERT through a reader rather than ExecuteNonQueryAsync, which asks the server to drop
@@ -1434,28 +1472,8 @@ async Task<int> WriteRows(CamusDataReader reader, bool vertical)
             continue;
         }
 
-        if (table is null)
-        {
-            table = new()
-            {
-                Border = TableBorder.Square
-            };
-
-            // Column names come from the server, so they're data like everything else it sends:
-            // escaped the same way, since a name with '[' or Spectre markup in it (possible from
-            // a backtick-quoted identifier) would otherwise render as markup or throw mid-run.
-            foreach (KeyValuePair<string, ColumnValue> item in current)
-                table.AddColumn(Markup.Escape(item.Key));
-        }
-
-        string[] row = new string[current.Count];
-
-        int i = 0;
-
-        foreach (KeyValuePair<string, ColumnValue> item in current)
-            row[i++] = FormatValue(item.Value);
-
-        table.AddRow(row);
+        table ??= NewResultTable(current);
+        AddResultRow(table, current);
         rows++;
     }
 
@@ -1463,6 +1481,61 @@ async Task<int> WriteRows(CamusDataReader reader, bool vertical)
         AnsiConsole.Write(table);
 
     return rows;
+}
+
+// Writes the rows of an EXPLAIN as a flow from the source to the result, the way the web console's
+// Flow view draws it. Rows that do not have the EXPLAIN shape go to the plain table instead.
+static async Task<int> WritePlan(CamusDataReader reader)
+{
+    List<Dictionary<string, ColumnValue>> rows = [];
+
+    while (await reader.ReadAsync())
+        rows.Add(ConnectionHelper.ReadCurrentRow(reader));
+
+    if (QueryPlanParser.TryParse(rows) is { } plan)
+    {
+        QueryPlanFlow.Write(AnsiConsole.Console, plan);
+    }
+    else if (rows.Count > 0)
+    {
+        Table table = NewResultTable(rows[0]);
+
+        foreach (Dictionary<string, ColumnValue> row in rows)
+            AddResultRow(table, row);
+
+        AnsiConsole.Write(table);
+    }
+
+    return rows.Count;
+}
+
+// The table for a result set, with one column for each column of `first`.
+static Table NewResultTable(Dictionary<string, ColumnValue> first)
+{
+    Table table = new()
+    {
+        Border = TableBorder.Square
+    };
+
+    // Column names come from the server, so they're data like everything else it sends:
+    // escaped the same way, since a name with '[' or Spectre markup in it (possible from
+    // a backtick-quoted identifier) would otherwise render as markup or throw mid-run.
+    foreach (KeyValuePair<string, ColumnValue> item in first)
+        table.AddColumn(Markup.Escape(item.Key));
+
+    return table;
+}
+
+static void AddResultRow(Table table, Dictionary<string, ColumnValue> current)
+{
+    string[] row = new string[current.Count];
+
+    int i = 0;
+
+    foreach (KeyValuePair<string, ColumnValue> item in current)
+        row[i++] = FormatValue(item.Value);
+
+    table.AddRow(row);
 }
 
 // Runs one `backup …` subcommand against the node's backup admin API. A usage mistake is reported and
@@ -2249,6 +2322,9 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                [cyan]--force[/] carries on past failures");
     AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
     AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
+    AnsiConsole.MarkupLine("  [cyan]\\plan[/] [[flow|table]]          How EXPLAIN shows a plan: a flow from the source to");
+    AnsiConsole.MarkupLine("                                the result (default), or the rows as a table. [cyan]\\G[/] and");
+    AnsiConsole.MarkupLine("                                [cyan]--format[/] always give the rows");
     AnsiConsole.MarkupLine("  [cyan]clear[/] / [cyan]exit[/] / [cyan]quit[/]         Clear the screen / leave the shell");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Cluster settings:[/] [grey58](SQL, not shell commands; each runs without a current database)[/]");

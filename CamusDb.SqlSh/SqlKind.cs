@@ -184,6 +184,30 @@ internal static class SqlKind
         return true;
     }
 
+    // The shell's `\plan [flow|table]` command, which picks how EXPLAIN shows a plan. `arguments` is
+    // the text after the command, empty when there is none.
+    internal static bool IsPlanViewCommand(string sql, out string arguments)
+    {
+        arguments = "";
+
+        string trimmedSql = sql.Trim().TrimEnd(';').Trim();
+
+        if (!trimmedSql.StartsWith("\\plan", StringComparison.InvariantCultureIgnoreCase))
+            return false;
+
+        if (trimmedSql.Length > 5 && !char.IsWhiteSpace(trimmedSql[5]))
+            return false;
+
+        arguments = trimmedSql.Length > 5 ? trimmedSql[5..].Trim() : "";
+        return true;
+    }
+
+    // EXPLAIN in each of its forms: plain, (LOGICAL), (PHYSICAL) and (ANALYZE).
+    internal static bool IsExplain(string sql)
+    {
+        return StartsWithWords(sql, "explain");
+    }
+
     internal static bool IsBeginTx(string sql)
     {
         string trimmedSql = sql.Trim();
