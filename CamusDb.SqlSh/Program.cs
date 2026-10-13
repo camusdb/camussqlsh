@@ -919,9 +919,7 @@ while (true)
 
         string sqlTrim = sql.Trim();
 
-        if (pendingSql.Length == 0 &&
-            (string.Equals(sqlTrim, "exit", StringComparison.InvariantCultureIgnoreCase)
-            || string.Equals(sqlTrim, "quit", StringComparison.InvariantCultureIgnoreCase)))
+        if (pendingSql.Length == 0 && IsExitCommand(sqlTrim))
         {
             if (transaction is not null)
             {
@@ -2017,6 +2015,20 @@ static async Task ExecuteDDL(CamusConnection connection, string sql)
 }
 
 
+// Recognizes the words that leave the shell: `exit` and `quit`, plus the psql-style `\q` and the
+// slash-style `/quit` and `/exit` that users bring over from other clients.
+static bool IsExitCommand(string sql)
+{
+    string[] commands = ["exit", "quit", "\\q", "/quit", "/exit"];
+    foreach (string command in commands)
+    {
+        if (string.Equals(sql, command, StringComparison.InvariantCultureIgnoreCase))
+            return true;
+    }
+
+    return false;
+}
+
 // Recognizes the shell's own `show prepared` / `\prepared` command, optionally followed by the
 // statement to ask about instead of the last one executed.
 static bool IsShowPrepared(string sql, out string? statement)
@@ -2325,7 +2337,8 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [cyan]\\plan[/] [[flow|table]]          How EXPLAIN shows a plan: a flow from the source to");
     AnsiConsole.MarkupLine("                                the result (default), or the rows as a table. [cyan]\\G[/] and");
     AnsiConsole.MarkupLine("                                [cyan]--format[/] always give the rows");
-    AnsiConsole.MarkupLine("  [cyan]clear[/] / [cyan]exit[/] / [cyan]quit[/]         Clear the screen / leave the shell");
+    AnsiConsole.MarkupLine("  [cyan]clear[/]                       Clear the screen");
+    AnsiConsole.MarkupLine("  [cyan]exit[/] / [cyan]quit[/]                 Leave the shell; [cyan]\\q[/], [cyan]/quit[/] and [cyan]/exit[/] also work");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Cluster settings:[/] [grey58](SQL, not shell commands; each runs without a current database)[/]");
     AnsiConsole.MarkupLine("  [cyan]show variables[/] [[like '<pattern>']]");

@@ -188,7 +188,7 @@ The shell runs these commands itself. It does not send them to the server.
 | `\plan [flow\|table]` | Set how `EXPLAIN` shows a plan. See [Query Plans](#query-plans-explain). |
 | `backup …` | Take and manage backups. See [Backups](#backups). |
 | `clear` | Clear the screen. |
-| `exit`, `quit` | Leave the shell. |
+| `exit`, `quit`, `\q`, `/quit`, `/exit` | Leave the shell. |
 
 All other text goes to the server as SQL.
 
@@ -211,7 +211,8 @@ database in the middle of the file. The shell refuses `use` in an open transacti
 The shell keeps track of the transaction that `begin` (or `start transaction`) opens:
 
 - You can have only one open transaction at a time.
-- `exit` and `quit` do not work while a transaction is open. Run `commit` or `rollback` first.
+- `exit`, `quit`, `\q`, `/quit` and `/exit` do not work while a transaction is open. Run
+  `commit` or `rollback` first.
 - If `commit` or `rollback` fails, the shell forgets the transaction, so you can start a new one.
 - If a statement in the transaction fails, the shell also forgets the transaction.
 
