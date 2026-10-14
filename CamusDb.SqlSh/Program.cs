@@ -709,6 +709,7 @@ if (richEditorSupported)
 
     string[] commands = [
         "clear",
+        "help",
         "source",
         "use",
         "exit",
@@ -717,6 +718,21 @@ if (richEditorSupported)
         "init",
         "run",
         "backup",
+    ];
+
+    // The shell's own commands that start with a '\\' or a '/'. They are colored like the commands
+    // above, but completion does not offer them.
+    string[] slashCommands = [
+        "\\export",
+        "/export",
+        "\\plan",
+        "/plan",
+        "\\prepared",
+        "\\h",
+        "/help",
+        "\\q",
+        "/quit",
+        "/exit",
     ];
 
     string[] constants = [
@@ -752,6 +768,9 @@ if (richEditorSupported)
         worldHighlighter.AddWord(func, funcStyle);
 
     foreach (string command in commands)
+        worldHighlighter.AddWord(command, commandStyle);
+
+    foreach (string command in slashCommands)
         worldHighlighter.AddWord(command, commandStyle);
 
     foreach (string constant in constants)
@@ -937,6 +956,12 @@ while (true)
             continue;
         }
 
+        if (pendingSql.Length == 0 && IsHelpCommand(sqlTrim))
+        {
+            PrintShellHelp();
+            continue;
+        }
+
         // Handled here rather than sent on: preparation is a client-side decision, so only the driver
         // knows the answer. Takes `show prepared` before the server can see it as a SHOW statement.
         if (pendingSql.Length == 0 && IsShowPrepared(sqlTrim, out string? preparedArg))
@@ -996,7 +1021,7 @@ while (true)
         if (!CarriesPassword(executableSql))
             AddHistory(history, executableSql);
 
-        await ExecuteSql(executableSql);
+        await ExecuteSql(executableSql, fromPrompt: true);
 
         if (sqlCompletion is not null && ChangesTableSet(executableSql) && HasDatabase(activeConnectionString))
             await sqlCompletion.RefreshTablesAsync(connection);
@@ -1134,17 +1159,18 @@ async Task SwitchDatabase(string database)
 }
 
 
-async Task ExecuteSql(string input)
+// `fromPrompt` is true for a line typed at the prompt, where the shell can ask the user a question.
+async Task ExecuteSql(string input, bool fromPrompt = false)
 {
     // Also fold smart quotes here so the -e/--execute flag benefits, not just the interactive
     // prompt. Idempotent, so re-folding an already-normalized statement is a no-op.
     input = NormalizeSmartQuotes(input);
 
     foreach ((string sql, bool vertical) in EscapeStringIntoLines(input))
-        await ExecuteStatement(sql, vertical);
+        await ExecuteStatement(sql, vertical, fromPrompt);
 }
 
-async Task ExecuteStatement(string sql, bool vertical)
+async Task ExecuteStatement(string sql, bool vertical, bool fromPrompt = false)
 {
     if (string.IsNullOrWhiteSpace(sql))
         return;
@@ -1179,6 +1205,14 @@ async Task ExecuteStatement(string sql, bool vertical)
     if (IsPlanViewCommand(sql, out string planViewArguments))
     {
         SetPlanView(planViewArguments);
+        return;
+    }
+
+    // The export is the shell's too: the server sends the rows as for any query, and the shell writes
+    // them to a file. Handled here, so a script file and -e can export too.
+    if (IsExportCommand(sql, out string exportArguments))
+    {
+        await ExportResultSet(exportArguments, fromPrompt);
         return;
     }
 
@@ -1407,7 +1441,136 @@ async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = 
     AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, duration);
 }
 
-// Handles `\plan`, `\plan flow` and `\plan table`. With no argument, it tells which view is on.
+// Runs `\export <csv|json|yaml> [to <file>] <query>`: the rows of the query go to a file, not to the
+// screen. With no file, the shell suggests <table>-<date>-<time>.<format> in the current directory: at
+// the prompt the user can edit that name first, and anywhere else the shell takes it. The rows go to a
+// temporary file first, so a query that fails halfway does not leave half a file at the target.
+async Task ExportResultSet(string arguments, bool fromPrompt)
+{
+    if (!TryParseExportArguments(arguments, out string formatName, out string? path, out string query)
+        || !TryParseExportFormat(formatName, out OutputFormat format))
+    {
+        AnsiConsole.MarkupLine("[red]Usage: \\export csv|json|yaml [[to <file>]] <query>[/]\n");
+        return;
+    }
+
+    bool systemLevel = IsSystemLevelQuery(query);
+
+    if (!systemLevel && !IsQueryable(query))
+    {
+        AnsiConsole.MarkupLine("[red]\\export needs a statement that returns rows, such as SELECT or SHOW.[/]\n");
+        return;
+    }
+
+    if (!systemLevel && !HasDatabase(activeConnectionString))
+    {
+        AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
+        return;
+    }
+
+    if (path is null)
+    {
+        string extension = format == OutputFormat.Yaml ? "yaml" : formatName.ToLowerInvariant();
+        string suggestion = SuggestExportFileName(query, extension, DateTime.Now);
+
+        path = fromPrompt ? await AskExportPath(suggestion) : suggestion;
+
+        if (path is null)
+        {
+            AnsiConsole.MarkupLine("[yellow]Export cancelled.[/]\n");
+            return;
+        }
+    }
+
+    // The shell does not expand `~` the way a Unix shell does, so it is done here.
+    if (path.StartsWith("~/", StringComparison.Ordinal))
+        path = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile) + path[1..];
+
+    string fullPath = Path.GetFullPath(path);
+
+    CamusConnection queryConnection = systemLevel
+        ? await ConnectionHelper.OpenAsync(GetEndpointConnectionString(activeConnectionString))
+        : connection;
+
+    await using CamusCommand cmd = queryConnection.CreateSelectCommand(query);
+
+    cmd.CommandTimeout = 60;
+    cmd.Transaction = transaction;
+
+    Stopwatch stopwatch = Stopwatch.StartNew();
+
+    CamusDataReader reader = await cmd.ExecuteReaderAsync();
+
+    string tempPath = fullPath + ".tmp";
+    int rows;
+
+    try
+    {
+        await using (FileStream stream = new(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            rows = await new StructuredResultWriter(format, stream).WriteAsync(reader);
+
+        File.Move(tempPath, fullPath, overwrite: true);
+    }
+    catch
+    {
+        File.Delete(tempPath);
+        throw;
+    }
+
+    AnsiConsole.MarkupLine("[blue]{0}[/] rows exported to [cyan]{1}[/] ({2})\n", rows, Markup.Escape(fullPath), stopwatch.Elapsed);
+}
+
+// Asks where an export goes, with the suggested name already typed in: Enter takes it, and any edit
+// changes it. Returns null when the user empties the line or cancels with Ctrl+C. Without the rich
+// editor, the name cannot be typed in, so the plain prompt shows it as the default instead.
+async Task<string?> AskExportPath(string suggestion)
+{
+    string? answer;
+
+    if (editor is null)
+    {
+        answer = AnsiConsole.Prompt(new TextPrompt<string>("Export to:").DefaultValue(suggestion));
+    }
+    else
+    {
+        LineEditor pathEditor = new()
+        {
+            Text = suggestion,
+            Prompt = new LineEditorPrompt("[grey58]Export to:[/]")
+        };
+
+        answer = await pathEditor.ReadLine(CancellationToken.None);
+    }
+
+    answer = answer?.Trim().Trim('"', '\'');
+
+    return string.IsNullOrEmpty(answer) ? null : answer;
+}
+
+static bool TryParseExportFormat(string name, out OutputFormat format)
+{
+    switch (name.ToLowerInvariant())
+    {
+        case "csv":
+            format = OutputFormat.Csv;
+            return true;
+
+        case "json":
+            format = OutputFormat.Json;
+            return true;
+
+        case "yaml" or "yml":
+            format = OutputFormat.Yaml;
+            return true;
+
+        default:
+            format = OutputFormat.Table;
+            return false;
+    }
+}
+
+// Handles `\plan`, `\plan flow` and `\plan table`, and the same with `/plan`. With no argument, it
+// tells which view is on.
 void SetPlanView(string argument)
 {
     if (argument.Length == 0)
@@ -2034,6 +2197,22 @@ static bool IsExitCommand(string sql)
     return false;
 }
 
+// Recognizes the words that list the shell's commands: `help`, plus the psql-style `\h` and `\?`,
+// `?` and the slash-style `/help`. A trailing `;` is allowed, since users type one out of habit.
+static bool IsHelpCommand(string sql)
+{
+    string trimmed = sql.TrimEnd(';').TrimEnd();
+
+    string[] commands = ["help", "\\h", "\\?", "?", "/help"];
+    foreach (string command in commands)
+    {
+        if (string.Equals(trimmed, command, StringComparison.InvariantCultureIgnoreCase))
+            return true;
+    }
+
+    return false;
+}
+
 // Recognizes the shell's own `show prepared` / `\prepared` command, optionally followed by the
 // statement to ask about instead of the last one executed.
 static bool IsShowPrepared(string sql, out string? statement)
@@ -2332,6 +2511,30 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  -u, --user / -p, --password   Credentials for an authenticated server");
     AnsiConsole.MarkupLine("                                (prefer CAMUS_PASSWORD over -p; see the shell's -p above)");
     AnsiConsole.WriteLine();
+    PrintShellHelp();
+    AnsiConsole.MarkupLine("[bold]Examples:[/]");
+    AnsiConsole.MarkupLine("  camus-cli mydb");
+    AnsiConsole.MarkupLine("  camus-cli mydb -u app                     [grey58](prompts for the password; or set CAMUS_PASSWORD)[/]");
+    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
+    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
+    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\" --format json | jq '.[[]].name'");
+    AnsiConsole.MarkupLine("  camus-cli mydb -f schema.sql");
+    AnsiConsole.MarkupLine("  cat schema.sql | camus-cli mydb -f -");
+    AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
+    AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
+    AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init tpcc --database tpcc --rows 1");
+    AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
+    AnsiConsole.MarkupLine("  camus-cli workload init tpcb --database tpcb --rows 10000");
+    AnsiConsole.MarkupLine("  camus-cli workload run tpcb --concurrency 8 --duration 120");
+}
+
+// The commands that work inside the interactive shell: the shell's own commands and the SQL that is
+// worth a reminder. `help` prints this section alone; `--help` prints it as part of the full usage.
+static void PrintShellHelp()
+{
     AnsiConsole.MarkupLine("[bold]Shell commands:[/]");
     AnsiConsole.MarkupLine("  [cyan]use[/] <database>              Switch the current database; the name may be");
     AnsiConsole.MarkupLine("                                [cyan]`backticked`[/]. Works in script files too");
@@ -2341,8 +2544,15 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
     AnsiConsole.MarkupLine("  [cyan]\\plan[/] [[flow|table]]          How EXPLAIN shows a plan: a flow from the source to");
     AnsiConsole.MarkupLine("                                the result (default), or the rows as a table. [cyan]\\G[/] and");
-    AnsiConsole.MarkupLine("                                [cyan]--format[/] always give the rows");
+    AnsiConsole.MarkupLine("                                [cyan]--format[/] always give the rows. [cyan]/plan[/] also works");
+    AnsiConsole.MarkupLine("  [cyan]\\export[/] csv|json|yaml [[to <file>]] <query>");
+    AnsiConsole.MarkupLine("                                Write the rows of a query to a file. With no file, the");
+    AnsiConsole.MarkupLine("                                shell suggests <table>-<date>-<time>.<format>; press");
+    AnsiConsole.MarkupLine("                                Enter to use it, or edit it. [cyan]/export[/] also works");
+    AnsiConsole.MarkupLine("  [cyan]backup[/] full|incremental <id>|coordinated|list|chain <id>|gc [[preview]]");
+    AnsiConsole.MarkupLine("                                Take and manage backups through the node's backup API");
     AnsiConsole.MarkupLine("  [cyan]clear[/]                       Clear the screen");
+    AnsiConsole.MarkupLine("  [cyan]help[/]                        Show these commands; [cyan]\\h[/], [cyan]\\?[/], [cyan]?[/] and [cyan]/help[/] also work");
     AnsiConsole.MarkupLine("  [cyan]exit[/] / [cyan]quit[/]                 Leave the shell; [cyan]\\q[/], [cyan]/quit[/] and [cyan]/exit[/] also work");
     AnsiConsole.WriteLine();
     AnsiConsole.MarkupLine("[bold]Cluster settings:[/] [grey58](SQL, not shell commands; each runs without a current database)[/]");
@@ -2385,23 +2595,6 @@ static void PrintHelp()
     AnsiConsole.MarkupLine("  [cyan]cancel query[/] '<query_id>'     Stop a running read on any node. A write or a");
     AnsiConsole.MarkupLine("                                schema change cannot be stopped");
     AnsiConsole.WriteLine();
-    AnsiConsole.MarkupLine("[bold]Examples:[/]");
-    AnsiConsole.MarkupLine("  camus-cli mydb");
-    AnsiConsole.MarkupLine("  camus-cli mydb -u app                     [grey58](prompts for the password; or set CAMUS_PASSWORD)[/]");
-    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5096;Database=mydb;Protocol=grpc\"");
-    AnsiConsole.MarkupLine("  camus-cli -c \"Endpoint=http://localhost:5095;Database=mydb;Protocol=rest\"");
-    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\"");
-    AnsiConsole.MarkupLine("  camus-cli mydb -e \"SELECT * FROM users\" --format json | jq '.[[]].name'");
-    AnsiConsole.MarkupLine("  camus-cli mydb -f schema.sql");
-    AnsiConsole.MarkupLine("  cat schema.sql | camus-cli mydb -f -");
-    AnsiConsole.MarkupLine("  camus-cli workload init bank --database demo --rows 5000");
-    AnsiConsole.MarkupLine("  camus-cli workload run northwind --concurrency 5 --duration 120");
-    AnsiConsole.MarkupLine("  camus-cli workload init factory --database factory");
-    AnsiConsole.MarkupLine("  camus-cli workload run factory --concurrency 4 --duration 120");
-    AnsiConsole.MarkupLine("  camus-cli workload init tpcc --database tpcc --rows 1");
-    AnsiConsole.MarkupLine("  camus-cli workload run tpcc --concurrency 4 --duration 120");
-    AnsiConsole.MarkupLine("  camus-cli workload init tpcb --database tpcb --rows 10000");
-    AnsiConsole.MarkupLine("  camus-cli workload run tpcb --concurrency 8 --duration 120");
 }
 
 // True when argv holds a bare -p / --password: one that ends the arguments, or that is followed by

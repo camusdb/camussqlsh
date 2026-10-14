@@ -186,8 +186,10 @@ The shell runs these commands itself. It does not send them to the server.
 | `source <file> [--force]` | Run the statements in a file. See [Script Files](#script-files). |
 | `show prepared [sql]` | Show the statements that the driver keeps prepared. See [Prepared statements](#prepared-statements). |
 | `\plan [flow\|table]` | Set how `EXPLAIN` shows a plan. See [Query Plans](#query-plans-explain). |
+| `\export csv\|json\|yaml [to <file>] <query>` | Write the rows of a query to a file. See [Exporting a result set](#exporting-a-result-set). |
 | `backup …` | Take and manage backups. See [Backups](#backups). |
 | `clear` | Clear the screen. |
+| `help`, `\h`, `\?`, `?`, `/help` | List the commands that work in the shell. |
 | `exit`, `quit`, `\q`, `/quit`, `/exit` | Leave the shell. |
 
 All other text goes to the server as SQL.
@@ -254,6 +256,36 @@ camus-cli -c "Endpoint=http://localhost:5095;Database=demo;MaxAutoPrepare=512;Au
 ```
 
 See [Prepared Statements](https://camusdb.github.io/docs/prepared-statements/) for more.
+
+### Exporting a result set
+
+`\export` runs a query and writes its rows to a file in CSV, JSON or YAML. The rows do not show on
+the screen. `/export` is the same command as `\export`.
+
+```sql
+\export csv select * from titles
+\export json to titles.json select id, title from titles where production_year > 2000
+/export yaml to 'my titles.yaml' select * from titles
+```
+
+- With no `to <file>`, the shell suggests a name: the first table after `FROM`, then the date and
+  the time, for example `titles-20261014-134650.csv`. When the query has no `FROM`, the name starts
+  with `export`. The file goes in the current directory.
+- At the prompt, the shell asks for the file name and types the suggestion for you. Press Enter to
+  use it, or edit it first. Press Ctrl+C to clear the line, and press it again on the empty line to
+  cancel the export. In a `source` file, with `-e` and with `-f`, the shell uses the suggestion
+  without a question.
+- Put the file name in quotes when it holds a space. A name that starts with `~/` is in your home
+  directory. An existing file with the same name is replaced.
+- The query must return rows, for example `SELECT`, `SHOW` or `EXPLAIN`.
+- The JSON and YAML files have the same shape as the [JSON and YAML Output](#json-and-yaml-output)
+  of `--format`.
+- The CSV file has a header record with the column names, then one record for each row. A SQL null
+  is an empty field. A bytes value is base64, and an array is its JSON text.
+- The shell writes the rows to a temporary file first. If the query fails, the shell deletes the
+  temporary file, and the target file does not change.
+
+The command works at the prompt, in `source` files, with `-e` and with `-f`.
 
 ## Multiline Input
 
@@ -737,7 +769,8 @@ Plan info  shape=ddea1051bfce4953, schema-deps=[1@0, 7@0]
 
 Use `\plan table` to show the rows of the plan as a table. Use `\plan flow` to show the flow again.
 `\plan` without an argument shows the current setting. The setting stays until the shell exits.
-The command works at the prompt, in `source` files, with `-e` and with `-f`.
+The command works at the prompt, in `source` files, with `-e` and with `-f`. `/plan` is the same
+command as `\plan`.
 
 `\G` and `--format json|yaml` always show the rows of the plan. The `--tui` mode also shows the
 rows.

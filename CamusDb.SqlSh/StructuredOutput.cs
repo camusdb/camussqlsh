@@ -6,6 +6,8 @@
  */
 
 using CamusDB.Client;
+using CsvHelper;
+using System.Buffers;
 using System.Globalization;
 using System.Text;
 using System.Text.Encodings.Web;
@@ -13,18 +15,19 @@ using System.Text.Json;
 
 /// <summary>
 /// How -e and -f print a result set: the Spectre table that the prompt also uses, or a document
-/// that another program can parse.
+/// that another program can parse. Csv is for <c>\export</c> only; <c>--format</c> does not take it.
 /// </summary>
 internal enum OutputFormat
 {
     Table,
     Json,
-    Yaml
+    Yaml,
+    Csv
 }
 
 /// <summary>
-/// Writes result sets to standard output as JSON or YAML, one document for each statement that
-/// returns rows.
+/// Writes result sets as JSON, YAML or CSV, one document for each statement that returns rows. The
+/// stream is standard output for <c>--format</c>, and a file for <c>\export</c>.
 ///
 /// <para>A JSON document is an array of objects, one object for each row. Two or more result sets
 /// give two or more arrays, one after the other, which is the stream that <c>jq</c> reads. A YAML
@@ -34,6 +37,9 @@ internal enum OutputFormat
 /// number or a bool, and a SQL null is null. A numeric value is a string, because it can hold more
 /// digits than a double, and a parser would round it. A bytes value is base64, and it is never
 /// clipped the way the table clips it.</para>
+///
+/// <para>A CSV document has a header record with the column names, then one record for each row.
+/// CSV has text only, so the types are lost, and a SQL null is an empty field.</para>
 /// </summary>
 internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
 {
@@ -90,9 +96,12 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
     {
         resultSets++;
 
-        return format == OutputFormat.Json
-            ? await WriteJsonAsync(reader)
-            : await WriteYamlAsync(reader);
+        return format switch
+        {
+            OutputFormat.Json => await WriteJsonAsync(reader),
+            OutputFormat.Csv => await WriteCsvAsync(reader),
+            _ => await WriteYamlAsync(reader)
+        };
     }
 
     private async Task<int> WriteJsonAsync(CamusDataReader reader)
@@ -172,7 +181,36 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
         return rows;
     }
 
-    // One cell as the CLR value that both formats write: null, string, long, double, float, bool,
+    // The header comes from the reader, not from the first row, so a result set with no rows still
+    // names its columns. CsvHelper quotes a field that holds a comma, a quote, a line break or an
+    // edge space.
+    private async Task<int> WriteCsvAsync(CamusDataReader reader)
+    {
+        int rows = 0;
+
+        await using StreamWriter text = new(output, Utf8NoBom, FlushThreshold, leaveOpen: true);
+        await using CsvWriter csv = new(text, CultureInfo.InvariantCulture, leaveOpen: true);
+
+        for (int i = 0; i < reader.FieldCount; i++)
+            csv.WriteField(reader.GetName(i));
+
+        await csv.NextRecordAsync();
+
+        while (await reader.ReadAsync())
+        {
+            for (int i = 0; i < reader.FieldCount; i++)
+                csv.WriteField(CsvValue(ToPlainValue(reader.GetColumnValue(i))));
+
+            await csv.NextRecordAsync();
+            rows++;
+        }
+
+        await csv.FlushAsync();
+
+        return rows;
+    }
+
+    // One cell as the CLR value that the formats write: null, string, long, double, float, bool,
     // byte[] or a list of those. Every ColumnType has a branch, as in the table's FormatValue.
     private static object? ToPlainValue(ColumnValue value)
     {
@@ -243,6 +281,34 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
                 json.WriteEndArray();
                 break;
         }
+    }
+
+    // One cell as CSV text. CSV has no null, so a SQL null is an empty field, the same as an empty
+    // string. An array is its JSON text, so a reader can still tell the elements apart.
+    private static string CsvValue(object? value)
+    {
+        return value switch
+        {
+            null => "",
+            string text => text,
+            long number => number.ToString(CultureInfo.InvariantCulture),
+            double number => number.ToString("R", CultureInfo.InvariantCulture),
+            float number => number.ToString("R", CultureInfo.InvariantCulture),
+            bool flag => flag ? "true" : "false",
+            byte[] bytes => Convert.ToBase64String(bytes),
+            List<object?> elements => JsonText(elements),
+            _ => ""
+        };
+    }
+
+    private static string JsonText(object? value)
+    {
+        ArrayBufferWriter<byte> buffer = new();
+
+        using (Utf8JsonWriter json = new(buffer, new JsonWriterOptions { Encoder = JsonOptions.Encoder }))
+            WriteJsonValue(json, value);
+
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
     private static string YamlValue(object? value)

@@ -51,6 +51,17 @@ namespace RadLine
                     }
                 }
 
+                // A shell command such as \export or /plan starts the line with a '\' or a '/'. Keep that
+                // character with the word after it, so the highlighter sees the whole command. Anywhere
+                // else on the line, a '/' is division and stays a token of its own.
+                if (!isOpen && buffer.Length == 0 && (character is '\\' or '/')
+                    && index + 1 < text.Length && char.IsLetter(text[index + 1])
+                    && string.IsNullOrWhiteSpace(text.Substring(0, index)))
+                {
+                    buffer += character;
+                    continue;
+                }
+
                 if (char.IsLetterOrDigit(character) || character == '_' || character == '\"' || character == '\'' || character == '`' || isOpen)
                 {
                     if (character is '\"' or '\'' or '`')

@@ -184,22 +184,77 @@ internal static class SqlKind
         return true;
     }
 
-    // The shell's `\plan [flow|table]` command, which picks how EXPLAIN shows a plan. `arguments` is
-    // the text after the command, empty when there is none.
+    // The shell's `\plan [flow|table]` (or `/plan`) command, which picks how EXPLAIN shows a plan.
+    // `arguments` is the text after the command, empty when there is none.
     internal static bool IsPlanViewCommand(string sql, out string arguments)
+    {
+        return IsSlashCommand(sql, "plan", out arguments);
+    }
+
+    // The shell's `\export <format> [to <file>] <query>` (or `/export`) command, which writes the rows
+    // of a query to a file. `arguments` is the text after the command, empty when there is none.
+    internal static bool IsExportCommand(string sql, out string arguments)
+    {
+        return IsSlashCommand(sql, "export", out arguments);
+    }
+
+    // A shell command that starts with a backslash, the psql way, or with a slash, the way other
+    // clients spell it: `\plan` and `/plan` are the same command. `arguments` is the text after the
+    // name, empty when there is none.
+    private static bool IsSlashCommand(string sql, string name, out string arguments)
     {
         arguments = "";
 
         string trimmedSql = sql.Trim().TrimEnd(';').Trim();
+        int length = name.Length + 1;
 
-        if (!trimmedSql.StartsWith("\\plan", StringComparison.InvariantCultureIgnoreCase))
+        if (trimmedSql.Length < length || (trimmedSql[0] != '\\' && trimmedSql[0] != '/'))
             return false;
 
-        if (trimmedSql.Length > 5 && !char.IsWhiteSpace(trimmedSql[5]))
+        if (!trimmedSql.AsSpan(1, name.Length).Equals(name, StringComparison.InvariantCultureIgnoreCase))
             return false;
 
-        arguments = trimmedSql.Length > 5 ? trimmedSql[5..].Trim() : "";
+        if (trimmedSql.Length > length && !char.IsWhiteSpace(trimmedSql[length]))
+            return false;
+
+        arguments = trimmedSql.Length > length ? trimmedSql[length..].Trim() : "";
         return true;
+    }
+
+    // Splits the arguments of `\export` into the format word, the optional file and the query. The file
+    // may be 'quoted' or "quoted" when its name holds a space. No SQL statement starts with `to`, so
+    // the word cannot be part of the query.
+    internal static bool TryParseExportArguments(string arguments, out string format, out string? path, out string query)
+    {
+        Match match = Regex.Match(
+            arguments,
+            """^(?<format>\w+)\s+(?:to\s+(?:'(?<path>[^']+)'|"(?<path>[^"]+)"|(?<path>\S+))\s+)?(?<query>\S.*)$""",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+        format = match.Success ? match.Groups["format"].Value : "";
+        path = match.Success && match.Groups["path"].Success ? match.Groups["path"].Value : null;
+        query = match.Success ? match.Groups["query"].Value : "";
+
+        // `to <file>` with no query after it is a usage mistake, not a query that starts with `to`.
+        return match.Success && !StartsWithWords(query, "to");
+    }
+
+    // The file name that `\export` suggests: the first table after FROM, or "export" when the query has
+    // none, then the date and time, so a second export of the same table does not replace the first.
+    // A character that a file name cannot hold becomes '_'.
+    internal static string SuggestExportFileName(string query, string extension, DateTime now)
+    {
+        Match match = Regex.Match(
+            query,
+            """\bfrom\s+(?:`(?<name>[^`]+)`|"(?<name>[^"]+)"|(?<name>[\w.]+))""",
+            RegexOptions.IgnoreCase);
+
+        string name = match.Success ? match.Groups["name"].Value : "export";
+        char[] invalid = Path.GetInvalidFileNameChars();
+
+        name = string.Concat(name.Select(c => invalid.Contains(c) || char.IsWhiteSpace(c) ? '_' : c));
+
+        return $"{name}-{now:yyyyMMdd-HHmmss}.{extension}";
     }
 
     // EXPLAIN in each of its forms: plain, (LOGICAL), (PHYSICAL) and (ANALYZE).
