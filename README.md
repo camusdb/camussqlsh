@@ -349,7 +349,7 @@ and the next `Tab` uses the names that the load got.
 
 `--tui` replaces the prompt with a full-screen mode. The screen has three panes:
 
-1. **Data Catalog**, on the left. It lists the tables of the current database. Expand a table to see its columns and their types.
+1. **Data Catalog**, on the left. It lists all the databases on the server. A green dot (`●`) marks the current database. Expand a database to see its tables, and expand a table to see its columns and their types.
 2. **Query Editor**, at the top right. It colors the SQL and completes words as the prompt does.
 3. **Query Results**, at the bottom right. It shows the rows of the last query and one log line for each statement.
 
@@ -375,27 +375,54 @@ These keys work in all panes:
 | --- | --- |
 | `Tab` | Go to the next pane. |
 | `Shift+Tab` | Go to the previous pane. |
-| `F5`, `Ctrl+R`, `Shift+Enter` | Run the statements in the editor. |
+| `Ctrl+R`, `F5`, `Shift+Enter` | Run the statement at the cursor. |
+| `Ctrl+G`, `F6` | Run all the statements in the editor. |
 | `Esc` | Cancel the running query, or close the help bar. |
+| `Ctrl+C` | Cancel the running query. If no query runs, quit. |
 | `F1` | Show or hide the key list. |
 | `F2` | Turn the row cap on or off. See [Row cap and paging](#row-cap-and-paging). |
+| `F4` | Load the Data Catalog again. |
 | `Ctrl+S` | Save the editor text to the query file. |
 | `Ctrl+L`, `Ctrl+U` | Empty the editor. |
 | `Ctrl+Q` | Quit. |
 
+The statement at the cursor starts at its first character and ends one character after its `;`.
+If the cursor is after the last statement, `Ctrl+R` runs the last statement.
+
+On a Mac keyboard, the function keys need `Fn` too. `Ctrl+R` and `Ctrl+G` do not, and they work
+on all terminals.
+
+If a transaction is open, `Ctrl+Q` and `Ctrl+C` do not quit at once. The key bar tells you that
+quitting rolls back the transaction. Press `Ctrl+Q` or `Ctrl+C` again to roll back and quit. Press any other
+key to stay.
+
+A paste always goes into the editor, at the cursor. A Tab or a line break in the pasted text
+stays in the text. This needs a terminal that supports bracketed paste. Most terminals do.
+
 `Shift+Enter` needs a terminal that supports the disambiguating keyboard protocol, for example
 Ghostty, Kitty, WezTerm or a recent iTerm2. On other terminals, `Shift+Enter` starts a new line.
-`F5` works on all terminals.
+`Ctrl+R` and `F5` work on all terminals.
 
 These keys work in the Data Catalog pane:
 
 | Key | Action |
 | --- | --- |
 | `Up` / `Down` | Move the selection. |
-| `Right` / `Enter` | Expand the selected table. |
-| `Left` | Collapse the selected table. |
+| `Right` | Expand the selected database or table. |
+| `Enter` | On a database that is not current, make it the current database, as `use` does. On other rows, expand the row. |
+| `Left` | Collapse the selected database or table. On a row that has no open children, go to its parent and collapse it. |
 | `Home` / `End` | Go to the first or the last row. |
+| `PageUp` / `PageDown` | Move the selection one screen. |
 | `Space` | Put the selected name into the editor at the cursor. |
+
+The catalog gets the database list from `show databases`. If the user cannot see that list, the
+catalog shows only the current database. The tables of a database load when you expand it. For a
+database that is not current, the catalog uses a separate connection that closes after the read.
+The editor stays connected to the current database.
+
+The catalog loads again after a statement that changes the tables or the databases, such as
+`CREATE TABLE` or `DROP DATABASE`. The catalog does not see changes from other sessions. Press `F4`
+to load it again.
 
 These keys work in the Query Editor pane:
 
@@ -404,27 +431,74 @@ These keys work in the Query Editor pane:
 | `Enter` | Start a new line. |
 | `Up` / `Down` | Move between lines. |
 | `Left` / `Right` | Move the cursor. |
+| `Option+Left` / `Option+Right`, `Ctrl+Left` / `Ctrl+Right` | Go to the previous or the next word. |
 | `Home` / `End` | Go to the start or the end of the line. |
+| `Ctrl+Home` / `Ctrl+End` | Go to the start or the end of the editor. |
+| `PageUp` / `PageDown` | Move the cursor one screen. |
 | `Backspace` / `Delete` | Delete text. |
+| `Option+Backspace`, `Ctrl+W` | Delete the word before the cursor. |
 | `Ctrl+N` | Complete the current word, or go to the next match. |
 | `Ctrl+P` | Go to the previous match. |
 
 `Tab` moves between panes, so the editor uses `Ctrl+N` and `Ctrl+P` for completion.
 
+On a Mac keyboard, `Home`, `End`, `PageUp` and `PageDown` need `Fn`. These keys do the same in all
+panes and do not need `Fn`:
+
+| Key | Same as |
+| --- | --- |
+| `Ctrl+A` | `Home` |
+| `Ctrl+E` | `End` |
+| `Option+Up` | `PageUp` |
+| `Option+Down` | `PageDown` |
+
+Most Mac terminals send `Option+Left` and `Option+Right` as word moves without a change to the
+settings. `Option+Up` and `Option+Down` work in terminals that send them as modified arrows, for
+example Ghostty, Kitty and WezTerm.
+
 These keys work in the Query Results pane:
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | Scroll one row. |
-| `PageUp` / `PageDown` | Scroll one screen. |
-| `Left` / `Right` | Scroll one column. |
-| `Home` | Go to the first row and the first column. |
+| `Up` / `Down` | Select the cell above or below. |
+| `Left` / `Right` | Select the cell to the left or to the right. |
+| `PageUp` / `PageDown` | Move the selection one screen. |
+| `Home` | Select the first cell of the first row. |
 | `End` | Go to the last row. |
+| `Enter` | Show the full value of the selected cell. |
+| `c` | Copy the value of the selected cell to the clipboard. |
+| `Shift+C` | Copy the selected row to the clipboard, with a Tab between the values. |
+| `m` | Show the messages. Press `m` again, or `Esc`, to go back to the grid. |
+
+The grid cuts a long value at 40 characters, and shows a line break as `↵`. Press `Enter` to see
+the full value in the value view. In the value view:
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down`, `PageUp` / `PageDown` | Scroll the value. |
+| `Left` / `Right` | Show the value of the previous or the next column. In the row view, show the previous or the next row. |
+| `v` | Change between the cell view and the row view. The row view shows all the columns of the row, one under the other. |
+| `c` | Copy what the view shows. |
+| `Esc`, `Enter` | Close the view. |
+
+The copy keys use OSC 52, an escape sequence that tells the terminal to write to the system
+clipboard. Ghostty, Kitty and WezTerm support it. In iTerm2, turn on "Applications in terminal
+may access clipboard". In a terminal without OSC 52, a copy has no effect. A bytes value is cut in the grid
+and in the value view, so a copy of it is cut too.
+
+### Messages
+
+The status line under the grid shows the outcome of the last run. If the outcome is too long for
+the line, the line ends with `M messages`. The messages view keeps the outcome of each statement,
+with the time and the statement. It keeps the last 500 messages. A run that fails opens the
+messages view, and a run that shows rows opens the grid. In the messages view, `c` copies all the
+messages.
 
 ### What the editor runs
 
-`F5` runs all statements in the editor, in order. Put a semicolon between statements. The Query
-Results pane shows one log line for each statement, and the grid shows the rows of the last query.
+`Ctrl+R` runs the statement at the cursor. `Ctrl+G` runs all statements in the editor, in order.
+Put a semicolon between statements. The Query Results pane shows one log line for each statement,
+and the grid shows the rows of the last query.
 
 The editor accepts the same input as the prompt, with one exception: the `backup` commands work
 at the prompt only. `use <database>` connects again and loads the catalog again. A statement that

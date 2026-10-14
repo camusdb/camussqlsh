@@ -1372,6 +1372,11 @@ async Task ExecuteRollbackTx(CamusConnection connection)
 // What Ctrl+C and a clean exit both want: undo an open transaction and persist the history.
 async Task ShutdownAsync()
 {
+    // The TUI keeps its own transaction and puts the terminal in modes the prompt never uses.
+    // Inside the TUI, Ctrl+C is a key, so this runs there only for a SIGINT from outside.
+    if (CamusTui.Active is { } tui)
+        await tui.ShutdownAsync();
+
     if (transaction is not null)
     {
         AnsiConsole.MarkupLine("[yellow]Rolling back active transaction...[/]");
@@ -2474,7 +2479,9 @@ static IEnumerable<string> NormalizeBuiltInOptions(IEnumerable<string> args)
 }
 
 // One statement pulled out of a script, with the line it started on so an error can point at it.
-public readonly record struct SqlStatement(string Sql, bool Vertical, int Line);
+// Start and End are offsets into everything fed so far: the first character of the statement and
+// its terminator (the last character, when the text ran out first). Both are inclusive.
+public readonly record struct SqlStatement(string Sql, bool Vertical, int Line, int Start = 0, int End = 0);
 
 // Splits SQL text into statements, tracking where a ';' actually terminates one: not inside a
 // string, a `quoted identifier`, or a comment. Holding the state in an object (rather than
@@ -2491,6 +2498,12 @@ public sealed class SqlScanner
     // sat on — leading blank lines and comments shouldn't shift the reported location.
     private int line = 1;
     private int statementLine = 1;
+
+    // Offsets for SqlStatement.Start and End. `fed` counts the characters of earlier chunks, and
+    // `at` is the offset of the character being read.
+    private int fed;
+    private int at;
+    private int statementStart;
 
     private bool hasContent;
     private char lastContentChar;
@@ -2518,6 +2531,8 @@ public sealed class SqlScanner
     {
         for (int i = 0; i < text.Length; i++)
         {
+            at = fed + i;
+
             char c = text[i];
             char next = i + 1 < text.Length ? text[i + 1] : '\0';
 
@@ -2620,6 +2635,7 @@ public sealed class SqlScanner
             if (c == '\\' && next == 'G')
             {
                 i++;
+                at = fed + i;
 
                 if (TryTake(vertical: true, out SqlStatement verticalStatement))
                     yield return verticalStatement;
@@ -2642,11 +2658,15 @@ public sealed class SqlScanner
 
             Append(c, content: true);
         }
+
+        fed += text.Length;
     }
 
     /// <summary>Yields a final statement left unterminated at the end of the input, if any.</summary>
     public IEnumerable<SqlStatement> Flush()
     {
+        at = Math.Max(0, fed - 1);
+
         if (TryTake(vertical: false, out SqlStatement statement))
             yield return statement;
     }
@@ -2660,6 +2680,7 @@ public sealed class SqlScanner
             if (!hasContent)
             {
                 statementLine = line;
+                statementStart = at;
                 hasContent = true;
             }
 
@@ -2691,7 +2712,7 @@ public sealed class SqlScanner
     private bool TryTake(bool vertical, out SqlStatement statement)
     {
         string sql = current.ToString().Trim();
-        int at = statementLine;
+        int firstLine = statementLine;
         bool any = hasContent;
 
         current.Clear();
@@ -2707,7 +2728,7 @@ public sealed class SqlScanner
             return false;
         }
 
-        statement = new SqlStatement(sql, vertical, at);
+        statement = new SqlStatement(sql, vertical, firstLine, Start: statementStart, End: at);
         return true;
     }
 }
