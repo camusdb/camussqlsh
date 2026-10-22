@@ -270,6 +270,10 @@ SqlCompletion? sqlCompletion = null;
 // highlighter built below is kept where both can reach it.
 WordHighlighter? sharedHighlighter = null;
 
+// The color of a function name, kept beside the highlighter so the functions of the loaded C#
+// extensions, which are known only after the connection opens, are colored like the built-ins.
+Style? functionStyle = null;
+
 // Set only for --format json|yaml, which is refused above outside -e and -f.
 StructuredResultWriter? structuredWriter = outputFormat == OutputFormat.Table
     ? null
@@ -611,6 +615,16 @@ if (richEditorSupported)
         "initially",
         "immediate",
         "deferred",
+        // C# extensions. CREATE TRIGGER <name> ON <table> BEFORE|AFTER <events> EXTERNAL NAME
+        // '<Type>', DROP TRIGGER <name> ON <table>, CALL <procedure>(<args>) and SHOW EXTENSIONS.
+        // None of these words is reserved to the parser, so all of them stay usable as table and
+        // column names. EXTERNAL is listed above for SET STORAGE.
+        "trigger",
+        "before",
+        "after",
+        "name",
+        "call",
+        "extensions",
     ];
 
     string[] functions = [
@@ -756,6 +770,7 @@ if (richEditorSupported)
     sharedHighlighter = worldHighlighter;
 
     Style funcStyle = new(foreground: Color.Lime);
+    functionStyle = funcStyle;
     Style keywordStyle = new(foreground: Color.Blue);
     Style commandStyle = new(foreground: Color.LightSkyBlue1);
     Style constantsStyle = new(foreground: Color.LightPink3);
@@ -854,6 +869,16 @@ if (sqlCompletion is not null)
     {
         CamusConnection settingsConnection = await ConnectionHelper.OpenAsync(GetEndpointConnectionString(activeConnectionString));
         await sqlCompletion.RefreshSettingsAsync(settingsConnection);
+
+        // The C# extensions this node loaded. SHOW EXTENSIONS needs a superuser, so for any other
+        // user the load fails and the extension names are neither completed nor colored.
+        await sqlCompletion.RefreshExtensionsAsync(settingsConnection);
+
+        if (sharedHighlighter is not null && functionStyle is Style style)
+        {
+            foreach (string function in sqlCompletion.ExtensionFunctions)
+                sharedHighlighter.AddWord(function, style);
+        }
     }
     catch (Exception)
     {

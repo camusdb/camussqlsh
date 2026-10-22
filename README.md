@@ -348,6 +348,10 @@ The editor gives a different color to each of these groups:
 The word lists follow the grammar of the server. Some colored words are not reserved by the
 server, so you can still use them as table and column names.
 
+The functions of the C# extensions that the server loaded get the color of the built-in functions.
+The shell reads them with `SHOW EXTENSIONS`, which needs a superuser. For other users, these
+functions are not colored.
+
 ## Autocompletion
 
 Press `Tab` to complete the word at the cursor. Press it again to go to the next match. Press
@@ -362,6 +366,9 @@ The completion looks at the word before the cursor:
 | `show ranges from index` | `table@index` names. Before the `@` you get table names. After it you get the indexes of that table. |
 | `alter`, `drop`, `show create` or `comment on` + `sequence` | Sequence names. |
 | `set cluster setting`, `reset cluster setting` | Configuration keys. |
+| `create trigger <name> on`, `drop trigger <name> on` | Table names. |
+| `call`, as the first word of a statement | Procedure names of the loaded C# extensions. |
+| `external name` | Trigger type names of the loaded C# extensions, in quotes. |
 | Any other word | SQL keywords, functions and shell commands. |
 
 ```sql
@@ -369,6 +376,7 @@ select * from us⇥              -- completes to a table such as "users"
 insert into ⇥                  -- cycles through all table names
 show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
 drop sequence ⇥                -- cycles through all sequence names
+call ⇥                         -- cycles through all procedure names
 sel⇥                           -- completes to "select"
 ```
 
@@ -376,6 +384,11 @@ The shell loads the names from the server. It loads them again at start, after `
 statement that creates, drops or changes a table, a view or a sequence. It loads the index names
 of a table at the first `Tab` that needs them. If that load is slow, the `Tab` completes nothing,
 and the next `Tab` uses the names that the load got.
+
+The shell loads the names of the C# extensions (functions, procedures and trigger types) one time,
+at start, with `SHOW EXTENSIONS`. The server loads its extensions only when it starts, so these
+names do not change while the shell runs. `SHOW EXTENSIONS` needs a superuser. For other users,
+the shell does not suggest these names.
 
 ## Full-Screen Mode (`--tui`)
 

@@ -353,7 +353,12 @@ internal static class SqlKind
                // database, so it runs on the endpoint connection, exactly as SHOW GRANTS does. USERS is
                // a plain identifier to the parser rather than a keyword, so the two-word prefix is
                // matched by words: the single-space StartsWith spelling would miss `SHOW  USERS`.
-               StartsWithWords(trimmedSql, "show", "users");
+               StartsWithWords(trimmedSql, "show", "users") ||
+               // The C# extension assemblies this node loaded at startup. Like SHOW VARIABLES it reports
+               // the node that answered and reads from no database, so it runs on the endpoint
+               // connection. EXTENSIONS is a plain identifier to the parser, so the prefix is matched
+               // by words.
+               StartsWithWords(trimmedSql, "show", "extensions");
     }
 
     // User and grant administration is server-level: like database DDL, these statements name their
@@ -525,7 +530,18 @@ internal static class SqlKind
                // the table's contents generation. One prefix covers both spellings, because the TABLE
                // keyword of TRUNCATE TABLE <table> is optional.
                trimmedSql.StartsWith("truncate ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase);
+               trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase) ||
+               IsTriggerDDL(trimmedSql);
+    }
+
+    // Trigger DDL. The server dispatches both as schema DDL: each one commits a replicated change to
+    // the table's schema record. TRIGGER is a plain identifier to the parser, so the prefixes are
+    // matched by words, and `DROP  TRIGGER` still matches. CALL is not here: it is DML, which
+    // writes inside the statement's transaction and reports a row count.
+    internal static bool IsTriggerDDL(string sql)
+    {
+        return StartsWithWords(sql, "create", "trigger") ||
+               StartsWithWords(sql, "drop", "trigger");
     }
 
     // Appends an empty Database= key when the connection string doesn't already carry one.

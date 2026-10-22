@@ -21,7 +21,9 @@ using RadLine;
 /// same way, from "show variables", for the cluster-settings statements, and index names
 /// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES. Sequence
 /// names are loaded from "show sequences" with the relation names and offered after
-/// SEQUENCE (ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE).
+/// SEQUENCE (ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE). The members of the loaded C#
+/// extensions come from "show extensions": procedure names after CALL, trigger types after
+/// EXTERNAL NAME, and function names with the static vocabulary.
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
@@ -58,10 +60,14 @@ internal sealed class SqlCompletion : ITextCompletion
     // answers in: one statement per table. Each entry is loaded on first use and kept.
     private readonly ConcurrentDictionary<string, Task<string[]>> _indexes = new(StringComparer.OrdinalIgnoreCase);
 
-    private readonly string[] _staticWords;
+    private readonly string[] _baseWords;
+    private volatile string[] _staticWords;
     private volatile string[] _tables = [];
     private volatile string[] _sequences = [];
     private volatile string[] _settings = [];
+    private volatile string[] _functions = [];
+    private volatile string[] _procedures = [];
+    private volatile string[] _triggerTypes = [];
 
     // The connection the table cache was loaded over, kept so an index list can be fetched later,
     // when the user asks for one. Null until the first refresh, which is also the point before
@@ -75,9 +81,21 @@ internal sealed class SqlCompletion : ITextCompletion
 
     public SqlCompletion(IEnumerable<string> staticWords)
     {
-        _staticWords = staticWords.Distinct(StringComparer.OrdinalIgnoreCase)
-                                  .OrderBy(w => w, StringComparer.OrdinalIgnoreCase)
-                                  .ToArray();
+        _baseWords = staticWords.ToArray();
+        _staticWords = Vocabulary(_baseWords);
+    }
+
+    /// <summary>
+    /// The SQL function names of the loaded C# extensions, aliases included. Empty until
+    /// <see cref="RefreshExtensionsAsync"/> runs, and empty for a user who is not a superuser.
+    /// </summary>
+    public IReadOnlyList<string> ExtensionFunctions => _functions;
+
+    private static string[] Vocabulary(IEnumerable<string> words)
+    {
+        return words.Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(w => w, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
     }
 
     public IEnumerable<string>? GetCompletions(string prefix, string word, string suffix)
@@ -90,6 +108,12 @@ internal sealed class SqlCompletion : ITextCompletion
 
         if (IsSequenceContext(prefix) && _sequences.Length > 0)
             return _sequences;
+
+        if (IsProcedureContext(prefix) && _procedures.Length > 0)
+            return _procedures;
+
+        if (IsTriggerTypeContext(prefix) && _triggerTypes.Length > 0)
+            return _triggerTypes;
 
         if (IsTableContext(prefix) && _tables.Length > 0)
             return _tables;
@@ -107,6 +131,12 @@ internal sealed class SqlCompletion : ITextCompletion
         if (TableContextKeywords.Contains(lastToken))
             return true;
 
+        // CREATE TRIGGER <name> ON <table> and DROP TRIGGER <name> ON <table>. ON alone also joins
+        // two tables by a condition, so the TRIGGER two words back is what decides.
+        if (string.Equals(lastToken, "on", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, 2), "trigger", StringComparison.OrdinalIgnoreCase))
+            return true;
+
         // SHOW STATISTICS FOR <table>. FOR on its own says nothing about what comes next — SHOW
         // GRANTS FOR wants a user name — so the word before it is what decides. The TABLE noise word
         // of SHOW STATISTICS FOR TABLE <table> already lands in the branch above.
@@ -120,6 +150,26 @@ internal sealed class SqlCompletion : ITextCompletion
     {
         return string.Equals(LastToken(prefix), "sequence", StringComparison.OrdinalIgnoreCase) &&
                !string.Equals(TokenFromEnd(prefix, 1), "create", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // CALL <procedure>(<args>). CALL is the first word of its statement, so a CALL anywhere else is
+    // a name, such as a column called call, and completes from the static vocabulary. The text
+    // before it must be empty or end a statement, because the TUI editor holds several of them.
+    private static bool IsProcedureContext(string prefix)
+    {
+        if (!string.Equals(LastToken(prefix), "call", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string before = prefix.TrimEnd()[..^"call".Length].TrimEnd();
+        return before.Length == 0 || before[^1] == ';';
+    }
+
+    // The EXTERNAL NAME '<Type>' of CREATE TRIGGER. The type names are offered with their quotes,
+    // because the line editor takes an opening quote as part of the word that is typed.
+    private static bool IsTriggerTypeContext(string prefix)
+    {
+        return string.Equals(LastToken(prefix), "name", StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(TokenFromEnd(prefix, 1), "external", StringComparison.OrdinalIgnoreCase);
     }
 
     // The INDEX of SHOW RANGES FROM INDEX <table>@<index>. INDEX alone is not enough — CREATE INDEX
@@ -333,6 +383,60 @@ internal sealed class SqlCompletion : ITextCompletion
         _settings = names.Distinct(StringComparer.OrdinalIgnoreCase)
                          .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
                          .ToArray();
+    }
+
+    /// <summary>
+    /// Loads the members of the C# extensions the node loaded at startup: function, procedure and
+    /// trigger type names. Extensions change only when a node restarts, so this is loaded once at
+    /// startup, like the configuration keys. SHOW EXTENSIONS needs a superuser and reads no
+    /// database, so pass a database-less connection. A failed load keeps the static vocabulary.
+    /// </summary>
+    public async Task RefreshExtensionsAsync(CamusConnection connection)
+    {
+        List<string> functions = new();
+        List<string> procedures = new();
+        List<string> triggerTypes = new();
+
+        try
+        {
+            using CamusCommand cmd = connection.CreateSelectCommand("show extensions");
+            cmd.CommandTimeout = 10;
+
+            CamusDataReader reader = await cmd.ExecuteReaderAsync();
+
+            // One row per assembly. Each member column holds a comma-separated list, empty when the
+            // assembly registered none of that kind.
+            while (await reader.ReadAsync())
+            {
+                Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
+
+                functions.AddRange(SplitList(Cell(row, "functions")));
+                procedures.AddRange(SplitList(Cell(row, "procedures")));
+                triggerTypes.AddRange(SplitList(Cell(row, "triggers")));
+            }
+        }
+        catch
+        {
+            return; // Not a superuser, or a server that predates extensions.
+        }
+
+        _functions = Vocabulary(functions);
+        _procedures = Vocabulary(procedures);
+
+        // A CLR type name is case-sensitive, and EXTERNAL NAME takes it as a string literal.
+        _triggerTypes = triggerTypes.Distinct(StringComparer.Ordinal)
+                                    .OrderBy(t => t, StringComparer.Ordinal)
+                                    .Select(t => $"'{t.Replace("'", "''", StringComparison.Ordinal)}'")
+                                    .ToArray();
+
+        _staticWords = Vocabulary(_baseWords.Concat(_functions));
+    }
+
+    private static IEnumerable<string> SplitList(string? value)
+    {
+        return string.IsNullOrEmpty(value)
+            ? []
+            : value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
     // A row's cell by column name, or null when the server does not send that column — an older
