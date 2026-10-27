@@ -13,8 +13,8 @@ using System.Text.RegularExpressions;
 /// those decisions need. Nothing here writes to the console or holds a connection, so the
 /// line-editor shell and the full-screen mode classify a statement the same way.
 ///
-/// Program.cs pulls these in with <c>using static SqlKind;</c>, so its call sites read
-/// exactly as they did when these were local functions.
+/// The shell's classes pull these in with <c>using static SqlKind;</c>, so their call sites
+/// read exactly as they did when these were local functions of Program.cs.
 /// </summary>
 internal static class SqlKind
 {
