@@ -739,7 +739,7 @@ statements (`select 1; select 2\G`).
 
 The shell shows the result of `EXPLAIN` as a flow. The source is at the top, and the result is at
 the bottom. Each operator is a box in the color of its family: source, join, filter, aggregate,
-sort, limit or output. An arrow between two boxes shows the number of rows that the upper operator
+sort, limit, output or set operation. An arrow between two boxes shows the number of rows that the upper operator
 produces:
 
 ```text
@@ -776,6 +776,10 @@ Plan info  shape=ddea1051bfce4953, schema-deps=[1@0, 7@0]
   marks the operator that costs more than each of the others.
 - The second input of a join has no row in the plan. A dashed box beside the join shows what the
   plan tells about it. On a narrow terminal, this information is a line in the box of the join.
+- A set operation (`UNION`, `INTERSECT`, `EXCEPT`) has two operands, and each operand has its own
+  plan. A `LEFT OPERAND` box and a `RIGHT OPERAND` box above the set operation show these plans.
+  The arrow at the bottom of each box shows the rows that the operand returns. A nested set
+  operation shows its operand boxes inside the box of its own operand.
 - With `EXPLAIN (ANALYZE)`, an arrow shows the measured rows and the estimate. Each operator also
   shows its storage counters. `Estimate off Nx` marks an operator whose measured rows are 10 times
   the estimate, or one tenth of it.

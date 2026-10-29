@@ -46,6 +46,15 @@ internal static class SqlVocabulary
         // listed below for other statements.
         "overriding",
         "value",
+        // INSERT … ON CONFLICT [(cols) | ON CONSTRAINT <name>] DO NOTHING | DO UPDATE SET c = excluded.c,
+        // and UPSERT INTO <table>, the update form with the primary key as the target. All five are
+        // plain identifiers to the parser and stay usable as names. ON and CONSTRAINT are listed
+        // for other statements.
+        "conflict",
+        "do",
+        "nothing",
+        "excluded",
+        "upsert",
         "delete",
         "alter",
         "rename",

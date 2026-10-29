@@ -16,6 +16,9 @@ using System.Globalization;
 /// <para>This is the terminal form of the web console's Flow view. Each operator is a panel in the
 /// colour of its family. A join's second input has no row in the plan, so it is a dashed box beside
 /// the join, or a line in the join's panel when the terminal is too narrow for the box.</para>
+///
+/// <para>A set operation has two inputs that both have rows. Each operand is a box above the set
+/// operation, with the operand's own flow inside it, so a nested set operation nests its boxes.</para>
 /// </summary>
 internal static class QueryPlanFlow
 {
@@ -53,30 +56,12 @@ internal static class QueryPlanFlow
     public static void Write(IAnsiConsole console, QueryPlan plan)
     {
         Glyphs glyphs = console.Profile.Capabilities.Unicode ? UnicodeGlyphs : AsciiGlyphs;
-        int width = console.Profile.Width;
-
-        bool hasSideInputs = plan.Nodes.Any(n => n.SideInput is not null);
-        bool sideBeside = hasSideInputs && width >= MinNodeWidth + LinkWidth + SideWidth;
-        int nodeWidth = Math.Max(Math.Min(MaxNodeWidth, sideBeside ? width - LinkWidth - SideWidth : width), 20);
-        int center = nodeWidth / 2;
 
         QueryPlanNode? hottest = Hottest(plan);
 
         List<IRenderable> lines = [Summary(plan, glyphs), Text.Empty];
 
-        for (int i = 0; i < plan.Nodes.Count; i++)
-        {
-            QueryPlanNode node = plan.Nodes[i];
-
-            if (i > 0)
-                lines.AddRange(Edge(plan.Nodes[i - 1], center, glyphs));
-
-            Panel panel = NodePanel(plan, node, node == hottest, nodeWidth, inlineSide: !sideBeside, glyphs);
-
-            lines.Add(sideBeside && node.SideInput is not null
-                ? WithSideBox(panel, node, nodeWidth, glyphs)
-                : panel);
-        }
+        int center = Chain(lines, plan, plan.Nodes, console.Profile.Width, hottest, glyphs) / 2;
 
         lines.AddRange(Edge(plan.Nodes[^1], center, glyphs));
         lines.Add(new Padder(
@@ -99,13 +84,88 @@ internal static class QueryPlanFlow
         console.Write(new Rows(lines));
     }
 
+    /// <summary>
+    /// Adds the panels of one chain and the edges between them to <paramref name="lines"/>, in the
+    /// <paramref name="width"/> columns that the chain has. Returns the width of its node panels.
+    /// </summary>
+    private static int Chain(List<IRenderable> lines, QueryPlan plan, IReadOnlyList<QueryPlanNode> nodes, int width,
+        QueryPlanNode? hottest, Glyphs glyphs)
+    {
+        bool hasSideInputs = nodes.Any(n => n.SideInput is not null);
+        bool sideBeside = hasSideInputs && width >= MinNodeWidth + LinkWidth + SideWidth;
+        int nodeWidth = Math.Max(Math.Min(MaxNodeWidth, sideBeside ? width - LinkWidth - SideWidth : width), 20);
+        int center = nodeWidth / 2;
+
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            QueryPlanNode node = nodes[i];
+
+            if (i > 0)
+                lines.AddRange(Edge(nodes[i - 1], center, glyphs));
+
+            if (node.Branches.Count > 0)
+            {
+                foreach (QueryPlanBranch branch in node.Branches)
+                    lines.Add(BranchPanel(plan, node, branch, nodeWidth, hottest, glyphs));
+
+                lines.AddRange(Edge(null, null, center, glyphs));
+            }
+
+            Panel panel = NodePanel(plan, node, node == hottest, nodeWidth, inlineSide: !sideBeside, glyphs);
+
+            lines.Add(sideBeside && node.SideInput is not null
+                ? WithSideBox(panel, node, nodeWidth, glyphs)
+                : panel);
+        }
+
+        return nodeWidth;
+    }
+
+    /// <summary>
+    /// One operand of a set operation: a box with the operand's flow inside it. The last edge in the
+    /// box carries the rows the operand returns. The operand row counts them under ANALYZE; plain
+    /// EXPLAIN gives the operand no count, so the estimate of the operand's last operator stands.
+    /// </summary>
+    private static Panel BranchPanel(QueryPlan plan, QueryPlanNode setOperation, QueryPlanBranch branch, int width,
+        QueryPlanNode? hottest, Glyphs glyphs)
+    {
+        // The box takes two columns for its borders and two for its padding.
+        int inner = Math.Max(width - 4, 20);
+        List<IRenderable> lines = [];
+
+        if (branch.Nodes.Count > 0)
+        {
+            QueryPlanNode last = branch.Nodes[^1];
+            int center = Chain(lines, plan, branch.Nodes, inner, hottest, glyphs) / 2;
+            lines.AddRange(Edge(branch.Operand.ActualRows ?? last.ActualRows,
+                branch.Operand.EstimatedRows ?? last.EstimatedRows, center, glyphs));
+        }
+        else
+        {
+            lines.Add(new Markup("[grey]The plan shows no operator for this operand.[/]"));
+        }
+
+        string side = branch.Side.Length == 0 ? "OPERAND" : $"{branch.Side.ToUpperInvariant()} OPERAND";
+
+        return new Panel(new Rows(lines))
+        {
+            Header = new PanelHeader($"[{KindColor(setOperation.Kind)} bold] {Markup.Escape(side)} [/]"),
+            Border = BoxBorder.Rounded,
+            BorderStyle = Style.Parse(EdgeColor),
+            Padding = new Padding(1, 0, 1, 0),
+            Width = width,
+        };
+    }
+
     /// <summary>The line over the flow: the stage, the operator count, the total cost and, with ANALYZE, the time.</summary>
     private static Markup Summary(QueryPlan plan, Glyphs glyphs)
     {
+        int operators = plan.AllNodes.Count();
+
         List<string> parts =
         [
             $"[grey85 on grey23] {Markup.Escape(plan.Stage)} [/]",
-            $"{plan.Nodes.Count} operator{(plan.Nodes.Count == 1 ? "" : "s")}",
+            $"{operators} operator{(operators == 1 ? "" : "s")}",
         ];
 
         if (plan.TotalEstimatedCost > 0)
@@ -197,26 +257,30 @@ internal static class QueryPlanFlow
     }
 
     /// <summary>The arrow out of <paramref name="from"/>. Its label and its weight give the rows that node produces.</summary>
-    private static IEnumerable<IRenderable> Edge(QueryPlanNode from, int center, Glyphs glyphs)
+    private static IEnumerable<IRenderable> Edge(QueryPlanNode from, int center, Glyphs glyphs) =>
+        Edge(from.ActualRows, from.EstimatedRows, center, glyphs);
+
+    /// <summary>An arrow that carries the given rows. With no count at all, it has no label.</summary>
+    private static IEnumerable<IRenderable> Edge(long? actualRows, long? estimatedRows, int center, Glyphs glyphs)
     {
-        long? rows = from.ActualRows ?? from.EstimatedRows;
+        long? rows = actualRows ?? estimatedRows;
         string shaft = rows >= HeavyEdgeRows ? glyphs.HeavyShaft : glyphs.Shaft;
         string pad = new(' ', center);
-        string label = EdgeLabel(from, glyphs) is string text ? $" [grey]{text}[/]" : "";
+        string label = EdgeLabel(actualRows, estimatedRows, glyphs) is string text ? $" [grey]{text}[/]" : "";
 
         yield return new Markup($"{pad}[{EdgeColor}]{shaft}[/]{label}");
         yield return new Markup($"{pad}[{EdgeColor}]{glyphs.Arrow}[/]");
     }
 
-    private static string? EdgeLabel(QueryPlanNode from, Glyphs glyphs)
+    private static string? EdgeLabel(long? actualRows, long? estimatedRows, Glyphs glyphs)
     {
-        if (from.ActualRows is long actual)
+        if (actualRows is long actual)
         {
             string text = $"{FormatCount(actual)} row{(actual == 1 ? "" : "s")}";
-            return from.EstimatedRows is long estimated ? $"{text} {glyphs.Separator} est. {FormatCount(estimated)}" : text;
+            return estimatedRows is long estimated ? $"{text} {glyphs.Separator} est. {FormatCount(estimated)}" : text;
         }
 
-        return from.EstimatedRows is long rows ? $"est. {FormatCount(rows)} row{(rows == 1 ? "" : "s")}" : null;
+        return estimatedRows is long rows ? $"est. {FormatCount(rows)} row{(rows == 1 ? "" : "s")}" : null;
     }
 
     /// <summary>
@@ -225,7 +289,7 @@ internal static class QueryPlanFlow
     /// </summary>
     private static QueryPlanNode? Hottest(QueryPlan plan)
     {
-        List<QueryPlanNode> costed = plan.Nodes
+        List<QueryPlanNode> costed = plan.AllNodes
             .Where(n => n.EstimatedCost > 0)
             .OrderByDescending(n => n.EstimatedCost)
             .ToList();
@@ -314,6 +378,7 @@ internal static class QueryPlanFlow
         PlanNodeKind.Limit => "#aed581",
         PlanNodeKind.Project => "#2ecc71",
         PlanNodeKind.Exchange => "#ff8a65",
+        PlanNodeKind.SetOperation => "#ffd54f",
         _ => "grey",
     };
 
@@ -327,6 +392,7 @@ internal static class QueryPlanFlow
         PlanNodeKind.Limit => "LIMIT",
         PlanNodeKind.Project => "OUTPUT",
         PlanNodeKind.Exchange => "EXCHANGE",
+        PlanNodeKind.SetOperation => "SET OPERATION",
         _ => "STEP",
     };
 
@@ -337,6 +403,7 @@ internal static class QueryPlanFlow
         "index-range-scan" => "Reads a range of keys from an index.",
         "index-in-list" => "Looks up each value of an IN list in an index.",
         "derived-table-scan" => "Reads the rows of a subquery in FROM.",
+        "function-scan" => "Makes rows with a function in FROM, without reading a table.",
         "constant-source" => "Makes one row without reading a table.",
         "filter" => "Keeps only the rows that match the condition.",
         "having-filter" => "Keeps only the groups that match HAVING.",
@@ -354,6 +421,10 @@ internal static class QueryPlanFlow
         "anti-join" => "Keeps each row that has no match in the subquery (NOT IN, NOT EXISTS).",
         "null-aware-anti-join" => "Keeps each row that has no match in the subquery, with the NULL rules of NOT IN.",
         "gather" => "Collects the rows from the partitions of the cluster.",
+        "union" => "Returns the rows of both operands. Without ALL, it removes duplicate rows.",
+        "intersect" => "Returns the rows that are in both operands.",
+        "except" => "Returns the rows of the left operand that are not in the right operand.",
+        "lock_rows" => "Locks each row before it passes the row on (FOR UPDATE).",
         _ => null,
     };
 

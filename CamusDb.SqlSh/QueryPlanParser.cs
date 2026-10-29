@@ -20,6 +20,7 @@ internal enum PlanNodeKind
     Limit,
     Project,
     Exchange,
+    SetOperation,
     Other,
 }
 
@@ -30,6 +31,10 @@ internal enum PlanNodeKind
 /// emits the chain root first. A join is a link in that chain whose left input is the next row;
 /// its right input never gets a row of its own, so the join's detail text is the only place that
 /// names it (see <see cref="QueryPlanNode.SideInput"/>).</para>
+///
+/// <para>A set operation (UNION, INTERSECT, EXCEPT) is the one place where the plan branches. It is
+/// the source of its chain, and each of its two operands is a chain of its own under an
+/// <c>operand</c> row (see <see cref="QueryPlanNode.Branches"/>).</para>
 /// </summary>
 internal sealed class QueryPlan
 {
@@ -42,6 +47,9 @@ internal sealed class QueryPlan
     /// <summary>The operators in data-flow order: the first one reads the source, the last one feeds the result.</summary>
     public required IReadOnlyList<QueryPlanNode> Nodes { get; init; }
 
+    /// <summary>Every operator of the plan: the main chain and, under each set operation, the chains of its operands.</summary>
+    public IEnumerable<QueryPlanNode> AllNodes => Flatten(Nodes);
+
     /// <summary>The trailing rows that describe the whole plan, such as <c>plan-info</c> and <c>cache</c>.</summary>
     public IReadOnlyList<QueryPlanNote> Notes { get; init; } = [];
 
@@ -50,6 +58,9 @@ internal sealed class QueryPlan
 
     /// <summary>Measured wall-clock time of the whole plan. Only EXPLAIN (ANALYZE) reports it.</summary>
     public double? TotalTimeMs { get; init; }
+
+    internal static IEnumerable<QueryPlanNode> Flatten(IEnumerable<QueryPlanNode> nodes) =>
+        nodes.SelectMany(n => n.Branches.SelectMany(b => Flatten(b.Nodes)).Prepend(n));
 }
 
 internal sealed class QueryPlanNode
@@ -94,6 +105,21 @@ internal sealed class QueryPlanNode
     /// that ran a broadcast probe (<c>broadcast-span</c>), one per span.
     /// </summary>
     public List<QueryPlanSpan> Spans { get; } = [];
+
+    /// <summary>The left and the right operand of a set operation. Empty for any other operator.</summary>
+    public List<QueryPlanBranch> Branches { get; } = [];
+}
+
+/// <summary>
+/// One operand of a set operation: the <c>operand</c> row, which under EXPLAIN (ANALYZE) counts the
+/// rows the operand returned, and the operand's own chain in data-flow order.
+/// </summary>
+internal sealed record QueryPlanBranch(QueryPlanNode Operand, IReadOnlyList<QueryPlanNode> Nodes)
+{
+    /// <summary><c>left</c> or <c>right</c>, as the detail of the operand row gives it.</summary>
+    public string Side => SideOf(Operand);
+
+    internal static string SideOf(QueryPlanNode operand) => operand.Detail.Split(',')[0].Trim();
 }
 
 internal sealed record QueryPlanSpan(string Detail, long? ActualRows, long? RowsRead);
@@ -190,22 +216,92 @@ internal static class QueryPlanParser
         if (nodes.Count == 0)
             return null;
 
-        // A plan comes root first, so the source is the last row. The FROM-less shape is the one
-        // exception: it lists constant-source, then project, then limit. The source is the only node
-        // with no input, so whichever end holds it is where the flow starts.
-        if (!(nodes[0].Kind == PlanNodeKind.Source && nodes[^1].Kind != PlanNodeKind.Source))
-            nodes.Reverse();
+        List<QueryPlanNode> flow;
+
+        if (nodes.Any(n => n.Kind == PlanNodeKind.SetOperation))
+        {
+            int position = 0;
+            flow = ReadChain(nodes, ref position, branch: false);
+        }
+        else
+        {
+            // A plan comes root first, so the source is the last row. The FROM-less shape is the one
+            // exception: it lists constant-source, then project, then limit. The source is the only
+            // node with no input, so whichever end holds it is where the flow starts.
+            flow = nodes;
+            if (!(flow[0].Kind == PlanNodeKind.Source && flow[^1].Kind != PlanNodeKind.Source))
+                flow.Reverse();
+        }
 
         return new QueryPlan
         {
             Stage = stage.Length == 0 ? (isAnalyze ? "analyze" : "physical") : stage,
             IsAnalyze = isAnalyze,
-            Nodes = nodes,
+            Nodes = flow,
             Notes = notes,
-            TotalEstimatedCost = nodes.Sum(n => n.EstimatedCost ?? 0),
-            TotalTimeMs = nodes.Select(n => n.ActualTimeMs).FirstOrDefault(t => t is not null),
+            TotalEstimatedCost = QueryPlan.Flatten(flow).Sum(n => n.EstimatedCost ?? 0),
+            TotalTimeMs = flow.Select(n => n.ActualTimeMs).FirstOrDefault(t => t is not null),
         };
     }
+
+    /// <summary>
+    /// Reads one chain from the rows, which come root first in a depth-first walk, and returns it in
+    /// data-flow order. A set operation is followed by its <c>operand(left)</c> row and the left
+    /// chain, then by its <c>operand(right)</c> row and the right chain.
+    ///
+    /// <para>The chain of an operand ends at its source, or at a nested set operation once both of
+    /// its operands are read. The main chain reads every row that is left, so a shape the parser
+    /// does not know still shows each of its operators.</para>
+    /// </summary>
+    private static List<QueryPlanNode> ReadChain(List<QueryPlanNode> rows, ref int position, bool branch)
+    {
+        List<QueryPlanNode> chain = [];
+
+        while (position < rows.Count)
+        {
+            QueryPlanNode node = rows[position];
+
+            // In an operand's chain, the next operand row belongs to the set operation above it.
+            if (branch && IsOperand(node))
+                break;
+
+            position++;
+            chain.Add(node);
+
+            if (node.Kind == PlanNodeKind.SetOperation)
+            {
+                ReadBranch(rows, ref position, node, "left");
+                ReadBranch(rows, ref position, node, "right");
+            }
+
+            if (branch && node.Kind is PlanNodeKind.Source or PlanNodeKind.SetOperation)
+                break;
+        }
+
+        chain.Reverse();
+        return chain;
+    }
+
+    /// <summary>
+    /// Reads one operand of <paramref name="setOperation"/> when the next row is its operand row.
+    /// The side must match, so a nested set operation never takes the right operand of the one
+    /// above it.
+    /// </summary>
+    private static void ReadBranch(List<QueryPlanNode> rows, ref int position, QueryPlanNode setOperation, string side)
+    {
+        if (position >= rows.Count || !IsOperand(rows[position]))
+            return;
+
+        QueryPlanNode operand = rows[position];
+        if (!string.Equals(QueryPlanBranch.SideOf(operand), side, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        position++;
+        setOperation.Branches.Add(new QueryPlanBranch(operand, ReadChain(rows, ref position, branch: true)));
+    }
+
+    private static bool IsOperand(QueryPlanNode node) =>
+        string.Equals(node.Operator, "operand", StringComparison.OrdinalIgnoreCase);
 
     private static QueryPlanNode CreateNode(string name, string detail, Dictionary<string, ColumnValue> row, Dictionary<string, string> columns)
     {
@@ -233,7 +329,7 @@ internal static class QueryPlanParser
     internal static PlanNodeKind Classify(string name) => name.ToLowerInvariant() switch
     {
         "table-scan" or "index-lookup" or "index-range-scan" or "index-in-list"
-            or "derived-table-scan" or "constant-source" => PlanNodeKind.Source,
+            or "derived-table-scan" or "function-scan" or "constant-source" => PlanNodeKind.Source,
         "nested-loop-join" or "index-nested-loop-join" or "hash-join" or "merge-join"
             or "semi-join" or "anti-join" or "null-aware-anti-join" => PlanNodeKind.Join,
         "filter" or "having-filter" => PlanNodeKind.Filter,
@@ -242,6 +338,7 @@ internal static class QueryPlanParser
         "limit" => PlanNodeKind.Limit,
         "project" => PlanNodeKind.Project,
         "gather" => PlanNodeKind.Exchange,
+        "union" or "intersect" or "except" => PlanNodeKind.SetOperation,
         _ => PlanNodeKind.Other,
     };
 
@@ -250,8 +347,20 @@ internal static class QueryPlanParser
         "table-scan" => Value(TableKey, detail),
         "index-lookup" or "index-range-scan" or "index-in-list" => Value(IndexKey, detail),
         "derived-table-scan" => Value(AliasKey, detail),
+        "function-scan" => FunctionName(detail),
         _ => null,
     };
+
+    /// <summary>
+    /// The function a <c>function-scan</c> calls: its detail starts with the call. The one-row source of
+    /// a FROM-less operand is <c>*single_row*()</c>, which is not a name a developer wrote, so it is left out.
+    /// </summary>
+    private static string? FunctionName(string detail)
+    {
+        int paren = detail.IndexOf('(');
+        string name = paren < 0 ? "" : detail[..paren].Trim();
+        return name.Length == 0 || name.StartsWith('*') ? null : name;
+    }
 
     /// <summary>
     /// Names a join's second input from the detail text. Only the facts each operator states without

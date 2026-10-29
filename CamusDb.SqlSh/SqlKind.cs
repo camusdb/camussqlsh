@@ -285,26 +285,29 @@ internal static class SqlKind
         return trimmedSql.StartsWith("rollback", StringComparison.InvariantCultureIgnoreCase);
     }
 
+    // The first word may be followed by any whitespace, so a SELECT on its own line is a query too.
+    // A statement that opens with a parenthesis is a set operation over parenthesized operands,
+    // (SELECT …) UNION (SELECT …), the only statement the grammar lets start that way.
     internal static bool IsQueryable(string sql)
     {
-        string trimmedSql = sql.Trim();
-    
-        return trimmedSql.StartsWith("select ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("explain ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("analyze ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("show ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("desc ", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("describe ", StringComparison.InvariantCultureIgnoreCase);
+        return sql.TrimStart().StartsWith('(') ||
+               StartsWithWords(sql, "select") ||
+               StartsWithWords(sql, "explain") ||
+               StartsWithWords(sql, "analyze") ||
+               StartsWithWords(sql, "show") ||
+               StartsWithWords(sql, "desc") ||
+               StartsWithWords(sql, "describe");
     }
 
     // Every INSERT goes through a reader, so an INSERT … RETURNING can show its rows. The server
     // decides the shape of the result: a reader with columns for a RETURNING list, and a bare
     // affected-row count for any other INSERT. Thus the shell does not look for the RETURNING
     // keyword itself, and a `returning` inside a string, a comment or a backtick-quoted name cannot
-    // confuse it.
+    // confuse it. UPSERT INTO is an INSERT with an implied ON CONFLICT clause, and it takes the
+    // same RETURNING list.
     internal static bool IsInsert(string sql)
     {
-        return StartsWithWords(sql, "insert");
+        return StartsWithWords(sql, "insert") || StartsWithWords(sql, "upsert");
     }
 
     // Collapses a statement onto one line for display, clipping anything past `max` characters.
