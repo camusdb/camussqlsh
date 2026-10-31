@@ -469,6 +469,10 @@ internal static class SqlKind
                // CREATE UNIQUE INDEX is the same statement with a constraint on the key, and it is
                // spelled out because UNIQUE sits between the verb and the noun.
                trimmedSql.StartsWith("create unique index ", StringComparison.InvariantCultureIgnoreCase) ||
+               // CREATE INVERTED INDEX is the CockroachDB spelling of a GIN index over a jsonb column.
+               StartsWithWords(trimmedSql, "create", "inverted", "index") ||
+               // DROP INDEX <index> ON <table>, DROP INDEX <table>.<index>, and both with IF EXISTS.
+               // The ALTER TABLE … DROP INDEX form is covered by the ALTER TABLE prefix below.
                trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
                // ALTER TABLE also adds, drops and renames keys, and a rename moves a name the
                // completion cache holds. ADD and DROP CONSTRAINT of a foreign key also create and
@@ -527,6 +531,10 @@ internal static class SqlKind
                IsSequenceDDL(trimmedSql) ||
                trimmedSql.StartsWith("create table ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("create index ", StringComparison.InvariantCultureIgnoreCase) ||
+               // CREATE UNIQUE INDEX and CREATE INVERTED INDEX (a GIN index) are the same statement,
+               // with one more word between the verb and the noun.
+               StartsWithWords(trimmedSql, "create", "unique", "index") ||
+               StartsWithWords(trimmedSql, "create", "inverted", "index") ||
                trimmedSql.StartsWith("drop table ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("drop index ", StringComparison.InvariantCultureIgnoreCase) ||
                // The server dispatches TRUNCATE as DDL: it commits a replicated schema change that moves

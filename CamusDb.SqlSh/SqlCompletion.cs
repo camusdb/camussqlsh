@@ -19,7 +19,8 @@ using RadLine;
 /// loaded lazily via "show tables" / "show views" / "show materialized views" and
 /// refreshed whenever the active database changes. Configuration keys are cached the
 /// same way, from "show variables", for the cluster-settings statements, and index names
-/// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES. Sequence
+/// per table, from "show indexes", for the FROM INDEX target of SHOW RANGES and the index of DROP
+/// INDEX (the table.index form and ALTER TABLE … DROP INDEX). Sequence
 /// names are loaded from "show sequences" with the relation names and offered after
 /// SEQUENCE (ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE). The members of the loaded C#
 /// extensions come from "show extensions": procedure names after CALL, trigger types after
@@ -55,7 +56,8 @@ internal sealed class SqlCompletion : ITextCompletion
         "setting",
     };
 
-    // SHOW RANGES FROM INDEX <table>@<index>, and its singular SHOW RANGE form. The index half is
+    // The index names of each table, as SHOW INDEXES gives them: for SHOW RANGES FROM INDEX
+    // <table>@<index>, DROP INDEX <table>.<index> and ALTER TABLE <table> DROP INDEX <index>. They are
     // listed per table rather than for the whole database, because that is the shape SHOW INDEXES
     // answers in: one statement per table. Each entry is loaded on first use and kept.
     private readonly ConcurrentDictionary<string, Task<string[]>> _indexes = new(StringComparer.OrdinalIgnoreCase);
@@ -106,6 +108,12 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsIndexContext(prefix))
             return IndexCompletions(word);
 
+        if (IsAlterTableDropIndexContext(prefix, out string alteredTable))
+            return DroppableIndexes(alteredTable);
+
+        if (IsDropIndexContext(prefix))
+            return DropIndexCompletions(word);
+
         if (IsSequenceContext(prefix) && _sequences.Length > 0)
             return _sequences;
 
@@ -129,6 +137,11 @@ internal sealed class SqlCompletion : ITextCompletion
             return false;
 
         if (TableContextKeywords.Contains(lastToken))
+            return true;
+
+        // CREATE [UNIQUE | INVERTED] INDEX <name> ON <table> and DROP INDEX <name> ON <table>, each
+        // with its optional IF [NOT] EXISTS between INDEX and the name.
+        if (string.Equals(lastToken, "on", StringComparison.OrdinalIgnoreCase) && IsIndexNameBefore(prefix, 1))
             return true;
 
         // CREATE TRIGGER <name> ON <table> and DROP TRIGGER <name> ON <table>. ON alone also joins
@@ -181,6 +194,80 @@ internal sealed class SqlCompletion : ITextCompletion
                string.Equals(TokenFromEnd(prefix, 1), "from", StringComparison.OrdinalIgnoreCase);
     }
 
+    // Whether the token `skip` positions back from the end names an index: the word after INDEX, or
+    // after the IF EXISTS or IF NOT EXISTS that follows INDEX.
+    private static bool IsIndexNameBefore(string prefix, int skip)
+    {
+        bool Is(int position, string word) =>
+            string.Equals(TokenFromEnd(prefix, position), word, StringComparison.OrdinalIgnoreCase);
+
+        int at = skip + 1;
+
+        if (Is(at, "exists") && Is(at + 1, "if"))
+            at += 2;
+        else if (Is(at, "exists") && Is(at + 1, "not") && Is(at + 2, "if"))
+            at += 3;
+
+        return Is(at, "index");
+    }
+
+    // How many tokens a trailing IF EXISTS takes at the end of the prefix: 2, or 0 when there is none.
+    private static int SkipIfExists(string prefix) =>
+        string.Equals(LastToken(prefix), "exists", StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(TokenFromEnd(prefix, 1), "if", StringComparison.OrdinalIgnoreCase) ? 2 : 0;
+
+    // The index of ALTER TABLE <table> DROP INDEX [IF EXISTS] <index>. The table is in the statement,
+    // so the index names are the bare ones of that table.
+    private static bool IsAlterTableDropIndexContext(string prefix, out string table)
+    {
+        int at = SkipIfExists(prefix);
+
+        bool matches =
+            string.Equals(TokenFromEnd(prefix, at), "index", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, at + 1), "drop", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, at + 3), "table", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, at + 4), "alter", StringComparison.OrdinalIgnoreCase);
+
+        table = matches ? TokenFromEnd(prefix, at + 2) : "";
+        return matches;
+    }
+
+    // The target of the standalone DROP INDEX [IF EXISTS]. ALTER TABLE … DROP INDEX is matched first,
+    // so what is left here is the statement that starts with DROP INDEX.
+    private static bool IsDropIndexContext(string prefix)
+    {
+        int at = SkipIfExists(prefix);
+
+        return string.Equals(TokenFromEnd(prefix, at), "index", StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(TokenFromEnd(prefix, at + 1), "drop", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // DROP INDEX needs its table, and the <table>.<index> form names it in the same word, because '.'
+    // is not a word boundary to the line editor. Before the '.' the table names are offered. After it,
+    // the indexes of that table are offered, qualified, so the whole target lands in the buffer. The
+    // DROP INDEX <index> ON <table> form gets its table names from the ON.
+    private IEnumerable<string>? DropIndexCompletions(string word)
+    {
+        int dot = word.IndexOf('.');
+
+        if (dot < 0)
+            return _tables.Length > 0 ? _tables : null;
+
+        string table = word[..dot];
+
+        return DroppableIndexes(table)?.Select(name => $"{table}.{name}").ToArray();
+    }
+
+    // The indexes of a table that DROP INDEX can drop. A name that starts with '~' (the primary key,
+    // or the index a foreign key made for itself) cannot be written in SQL, and the server keeps it
+    // out of reach of DROP INDEX, so it is not offered.
+    private IEnumerable<string>? DroppableIndexes(string table)
+    {
+        string[]? names = TableIndexes(table)?.Where(name => !name.StartsWith('~')).ToArray();
+
+        return names is { Length: > 0 } ? names : null;
+    }
+
     // The FROM INDEX target is one word to the line editor, because '@' is not a word boundary
     // there. So the completion has to be the whole `table@index` pair: completing the table half
     // alone would leave the user to type the index half with no help at all.
@@ -195,14 +282,24 @@ internal sealed class SqlCompletion : ITextCompletion
 
         string table = word[..at];
 
-        // The table half goes into a statement, so accept only a plain identifier. A half-typed or
-        // quoted name is not sent to the server; the target itself rejects quoted identifiers too.
+        // The primary index keeps its internal `~pk` spelling, which is what SHOW INDEXES prints and
+        // what the FROM INDEX target accepts.
+        return TableIndexes(table)?.Select(name => $"{table}@{name}").ToArray();
+    }
+
+    // The index names of one table, from the cache or from a load that ends in time. Null when the
+    // table name is not a plain identifier, when no database is selected yet, or when the load is
+    // slow, failed or found no index.
+    private string[]? TableIndexes(string table)
+    {
+        // The table name goes into a statement, so accept only a plain identifier. A half-typed or
+        // quoted name is not sent to the server.
         if (!IsPlainIdentifier(table))
             return null;
 
         CamusConnection? connection = _connection;
 
-        // No refresh has run yet, so no database is selected — and SHOW RANGES needs one.
+        // No refresh has run yet, so no database is selected — and SHOW INDEXES needs one.
         if (connection is null)
             return null;
 
@@ -253,11 +350,8 @@ internal sealed class SqlCompletion : ITextCompletion
         if (!loaded)
             return [];
 
-        // The name is qualified back onto the table the user typed, so what lands in the buffer is
-        // the whole target. The primary index keeps its internal `~pk` spelling, which is what
-        // SHOW INDEXES prints and what the parser accepts.
-        return names.Select(name => $"{table}@{name}")
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
+        // The bare names. Each caller qualifies them in the form its statement takes.
+        return names.Distinct(StringComparer.OrdinalIgnoreCase)
                     .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
                     .ToArray();
     }

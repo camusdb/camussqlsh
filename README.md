@@ -281,7 +281,8 @@ the screen. `/export` is the same command as `\export`.
 - The JSON and YAML files have the same shape as the [JSON and YAML Output](#json-and-yaml-output)
   of `--format`.
 - The CSV file has a header record with the column names, then one record for each row. A SQL null
-  is an empty field. A bytes value is base64, and an array is its JSON text.
+  is an empty field. A bytes value is base64, and an array is its JSON text. A `jsonb` value is the
+  document text.
 - The shell writes the rows to a temporary file first. If the query fails, the shell deletes the
   temporary file, and the target file does not change.
 
@@ -364,6 +365,9 @@ The completion looks at the word before the cursor:
 | `from`, `into`, `update`, `join`, `table`, `view`, `desc`, `describe`, `truncate`, `references` | Table and view names of the current database. |
 | `show statistics for` | Table names. |
 | `show ranges from index` | `table@index` names. Before the `@` you get table names. After it you get the indexes of that table. |
+| `drop index`, `drop index if exists` | `table.index` names. Before the `.` you get table names. After it you get the indexes of that table. |
+| `alter table <table> drop index`, with or without `if exists` | The indexes of that table. |
+| `create index <name> on`, `drop index <name> on` | Table names. This also works with `unique`, `inverted`, `if exists` and `if not exists`. |
 | `alter`, `drop`, `show create` or `comment on` + `sequence` | Sequence names. |
 | `set cluster setting`, `reset cluster setting` | Configuration keys. |
 | `create trigger <name> on`, `drop trigger <name> on` | Table names. |
@@ -375,6 +379,7 @@ The completion looks at the word before the cursor:
 select * from us⇥              -- completes to a table such as "users"
 insert into ⇥                  -- cycles through all table names
 show ranges from index users@⇥ -- cycles through "users@by_email", "users@~pk", …
+drop index users.⇥             -- cycles through "users.by_email", …
 drop sequence ⇥                -- cycles through all sequence names
 call ⇥                         -- cycles through all procedure names
 sel⇥                           -- completes to "select"
@@ -653,6 +658,7 @@ The values keep their types:
 | `string`, `uuid`, `date`, `timestamp` | string | string |
 | `bytes` | base64 string, not clipped | `!!binary` |
 | `array` | array | flow sequence (`[1, 2, 3]`) |
+| `jsonb`, `json` | the document itself: object, array, string, number, `true`, `false` or `null`. A number keeps all its digits. | the document as flow syntax (`{"a": [1, 2]}`) |
 
 `\G` has no effect with these formats. The interactive shell and `--tui` always show tables, so
 `--format json` and `--format yaml` without `-e` or `-f` is an error.
@@ -673,6 +679,9 @@ The shell splits statements at semicolons. It ignores a semicolon in:
 - `'single-quoted strings'` and `"double-quoted strings"`.
 - `` `quoted identifiers` ``.
 - `-- line comments`, `# line comments` and `/* block comments */`.
+
+A `#` that starts a `jsonb` operator is not a comment: `#>`, `#>>` and `#-` stay in the statement.
+`#--` is a comment.
 
 The shell understands doubled quotes (`'it''s'`) and backslash escapes (`'it\'s'`). It removes
 comments before it sends a statement to the server.

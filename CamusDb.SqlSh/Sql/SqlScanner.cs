@@ -134,7 +134,7 @@ public sealed class SqlScanner
                 continue;
             }
 
-            if (c == '#')
+            if (c == '#' && IsHashComment(text, i))
             {
                 OpenComment();
                 Skip(c);
@@ -190,6 +190,21 @@ public sealed class SqlScanner
         }
 
         fed += text.Length;
+    }
+
+    /// <summary>
+    /// Whether the '#' at <paramref name="i"/> opens a MySQL line comment. It does not when it starts
+    /// a jsonb operator: <c>#&gt;</c> and <c>#&gt;&gt;</c> read a path, and <c>#-</c> deletes one.
+    /// <c>#--</c> stays a comment, so a <c>#-----</c> rule in a dump still reads as one.
+    /// </summary>
+    internal static bool IsHashComment(string text, int i)
+    {
+        char next = i + 1 < text.Length ? text[i + 1] : '\0';
+
+        if (next == '>')
+            return false;
+
+        return next != '-' || (i + 2 < text.Length && text[i + 2] == '-');
     }
 
     /// <summary>Yields a final statement left unterminated at the end of the input, if any.</summary>

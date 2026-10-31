@@ -1152,7 +1152,10 @@ internal sealed class CamusTui
         int end = line.Position;
         int start = end;
 
-        while (start > 0 && (char.IsLetterOrDigit(line.Content[start - 1]) || line.Content[start - 1] == '_'))
+        // A qualified target is one word, as it is at the prompt: DROP INDEX <table>.<index> and SHOW
+        // RANGES FROM INDEX <table>@<index>, where the primary index is ~pk. Without '.', '@' and '~'
+        // the word would be the index half alone, and SqlCompletion could not tell which table it is in.
+        while (start > 0 && (char.IsLetterOrDigit(line.Content[start - 1]) || line.Content[start - 1] is '_' or '.' or '@' or '~'))
             start--;
 
         string word = line.Content[start..end];
@@ -2197,7 +2200,8 @@ internal sealed class CamusTui
                 char c = text[i];
                 char next = i + 1 < n ? text[i + 1] : '\0';
 
-                if ((c == '-' && next == '-' && (i + 2 >= n || char.IsWhiteSpace(text[i + 2]))) || c == '#')
+                if ((c == '-' && next == '-' && (i + 2 >= n || char.IsWhiteSpace(text[i + 2]))) ||
+                    (c == '#' && SqlScanner.IsHashComment(text, i)))
                 {
                     tokens.Add((i, n - i, TokenKind.Comment));
                     break;

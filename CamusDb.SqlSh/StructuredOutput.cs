@@ -36,7 +36,9 @@ internal enum OutputFormat
 /// <para>A value keeps its type where both formats have one: an integer, a float or a bool is a
 /// number or a bool, and a SQL null is null. A numeric value is a string, because it can hold more
 /// digits than a double, and a parser would round it. A bytes value is base64, and it is never
-/// clipped the way the table clips it.</para>
+/// clipped the way the table clips it. A jsonb value is the document itself: an object, an array or
+/// a scalar in JSON, and a flow mapping or a flow sequence in YAML, so a parser reads its structure
+/// and not a string that holds it.</para>
 ///
 /// <para>A CSV document has a header record with the column names, then one record for each row.
 /// CSV has text only, so the types are lost, and a SQL null is an empty field.</para>
@@ -65,6 +67,10 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
     };
 
     private int resultSets;
+
+    // A jsonb cell, kept apart from a string so each format writes the document and not a quoted
+    // copy of its text.
+    private readonly record struct JsonbText(string Text);
 
     public static bool TryParse(string? text, out OutputFormat format)
     {
@@ -223,6 +229,7 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
             // 0.1 and not 0.10000000149011612.
             ColumnType.Float32 => (float)value.FloatValue,
             ColumnType.Numeric => value.StrValue,
+            ColumnType.Jsonb => new JsonbText(value.StrValue ?? "null"),
             ColumnType.Bool => value.BoolValue,
             ColumnType.Uuid => !string.IsNullOrEmpty(value.UuidValue) ? value.UuidValue : value.AsGuid().ToString("D"),
             ColumnType.Date => value.IsoValue ?? new DateTime(value.LongValue, DateTimeKind.Utc).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
@@ -272,6 +279,13 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
                 json.WriteBase64StringValue(bytes);
                 break;
 
+            // The text came from the driver, which built it from a parsed document. The check is
+            // skipped because the writer reads at most 64 levels, and a document can have 512.
+            // A number keeps all its digits, which a double would round.
+            case JsonbText document:
+                json.WriteRawValue(document.Text, skipInputValidation: true);
+                break;
+
             case List<object?> elements:
                 json.WriteStartArray();
 
@@ -297,6 +311,7 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
             bool flag => flag ? "true" : "false",
             byte[] bytes => Convert.ToBase64String(bytes),
             List<object?> elements => JsonText(elements),
+            JsonbText document => document.Text,
             _ => ""
         };
     }
@@ -322,6 +337,9 @@ internal sealed class StructuredResultWriter(OutputFormat format, Stream output)
             float number => YamlFloat(number, number.ToString("R", CultureInfo.InvariantCulture)),
             bool flag => flag ? "true" : "false",
             byte[] bytes => "!!binary " + YamlQuote(Convert.ToBase64String(bytes)),
+            // JSON text is YAML 1.2 flow syntax: an object is a flow mapping, an array is a flow
+            // sequence, and a string is a double-quoted scalar with the same escapes.
+            JsonbText document => document.Text,
             List<object?> elements => string.Concat("[", string.Join(", ", elements.Select(YamlValue)), "]"),
             _ => "null"
         };

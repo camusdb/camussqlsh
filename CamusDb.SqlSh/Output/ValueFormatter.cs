@@ -25,6 +25,9 @@ internal static class ValueFormatter
             // The server sends the canonical decimal text, which can hold more digits than a decimal or
             // a double. It is shown as it arrives, so no digit is lost.
             ColumnType.Numeric => value.StrValue ?? "",
+            // The driver gives a document in the PostgreSQL text form on every transport, as psql
+            // prints it. A document holds '[' and ']', so it is escaped like a string.
+            ColumnType.Jsonb => !string.IsNullOrEmpty(value.StrValue) ? Markup.Escape(value.StrValue!) : "",
             ColumnType.Bool => value.BoolValue.ToString(),
             ColumnType.Uuid => FormatUuid(value),
             // The server sends a date as yyyy-MM-dd and a datetime in round-trip form, and that text is

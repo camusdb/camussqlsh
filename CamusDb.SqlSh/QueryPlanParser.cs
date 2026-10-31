@@ -328,8 +328,10 @@ internal static class QueryPlanParser
 
     internal static PlanNodeKind Classify(string name) => name.ToLowerInvariant() switch
     {
-        "table-scan" or "index-lookup" or "index-range-scan" or "index-in-list"
-            or "derived-table-scan" or "function-scan" or "constant-source" => PlanNodeKind.Source,
+        // A window node is the derived table of a windowed SELECT: the server prints it with no
+        // input rows of its own, so it is where its chain starts.
+        "table-scan" or "index-lookup" or "index-range-scan" or "index-in-list" or "gin-scan"
+            or "derived-table-scan" or "window" or "function-scan" or "constant-source" => PlanNodeKind.Source,
         "nested-loop-join" or "index-nested-loop-join" or "hash-join" or "merge-join"
             or "semi-join" or "anti-join" or "null-aware-anti-join" => PlanNodeKind.Join,
         "filter" or "having-filter" => PlanNodeKind.Filter,
@@ -345,7 +347,7 @@ internal static class QueryPlanParser
     private static string? DescribeTarget(string name, string detail) => name.ToLowerInvariant() switch
     {
         "table-scan" => Value(TableKey, detail),
-        "index-lookup" or "index-range-scan" or "index-in-list" => Value(IndexKey, detail),
+        "index-lookup" or "index-range-scan" or "index-in-list" or "gin-scan" => Value(IndexKey, detail),
         "derived-table-scan" => Value(AliasKey, detail),
         "function-scan" => FunctionName(detail),
         _ => null,

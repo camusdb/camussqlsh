@@ -99,6 +99,19 @@ internal static class SqlVocabulary
         // reserved to the parser. NUMERIC also starts the typed literal NUMERIC '1.23'.
         "numeric",
         "decimal",
+        // JSONB (alias JSON): one JSON document per cell. Neither word is reserved to the parser, so a
+        // table or a column can still be called json or jsonb. Both also start a typed literal, as in
+        // JSONB '{"a": 1}'.
+        "jsonb",
+        "json",
+        // GIN indexes over a jsonb column: CREATE INDEX <name> ON <table> USING GIN (<col>
+        // [jsonb_ops | jsonb_path_ops]), and the CockroachDB forms CREATE INVERTED INDEX and an
+        // INVERTED INDEX inside CREATE TABLE. The two operator class names build the same index.
+        "using",
+        "gin",
+        "inverted",
+        "jsonb_ops",
+        "jsonb_path_ops",
         "is",
         "on",
         "in",
@@ -159,6 +172,21 @@ internal static class SqlVocabulary
         // identifiers to the parser and stay usable as names. ALL is listed below for GRANT.
         "any",
         "some",
+        // Window functions: <function>(<args>) OVER ([PARTITION BY …] [ORDER BY …] [ROWS | RANGE
+        // <frame>]). OVER is a reserved word to the parser, so a column or a table called over needs
+        // backticks. The other words are plain identifiers and stay usable as names. ORDER, BY, RANGE,
+        // ROW, BETWEEN and AND are listed for other statements. The server refuses GROUPS frames and
+        // EXCLUDE by name, but they are still colored, so a refused statement reads the same as an
+        // accepted one.
+        "over",
+        "partition",
+        "rows",
+        "unbounded",
+        "preceding",
+        "following",
+        "current",
+        "groups",
+        "exclude",
         "cast",
         "case",
         "when",
@@ -425,12 +453,53 @@ internal static class SqlVocabulary
         "starts_with",
         "ends_with",
         "concat",
+        // The MySQL-style JSON functions. They take text and $.a.b[0] paths, and read a jsonb argument
+        // as its text.
         "json_valid",
         "json_type",
         "json_extract",
         "json_value",
         "json_contains",
         "json_array_length",
+        // The jsonb functions of PostgreSQL, with the json_* aliases that PostgreSQL has. The operator
+        // functions (jsonb_contains for @>, jsonb_exists for ?, …) are what a driver that rewrites ?
+        // uses, and a GIN index serves them as it serves the operators.
+        "to_jsonb",
+        "to_json",
+        "jsonb_build_object",
+        "json_build_object",
+        "jsonb_build_array",
+        "json_build_array",
+        "jsonb_object",
+        "json_object",
+        "jsonb_typeof",
+        "json_typeof",
+        "jsonb_array_length",
+        "jsonb_extract_path",
+        "json_extract_path",
+        "jsonb_extract_path_text",
+        "json_extract_path_text",
+        "jsonb_object_field",
+        "jsonb_object_field_text",
+        "jsonb_path_get",
+        "jsonb_path_get_text",
+        "jsonb_contains",
+        "jsonb_contained",
+        "jsonb_exists",
+        "jsonb_exists_any",
+        "jsonb_exists_all",
+        "jsonb_delete_path",
+        "jsonb_set",
+        "jsonb_set_lax",
+        "jsonb_insert",
+        "jsonb_strip_nulls",
+        "json_strip_nulls",
+        "jsonb_pretty",
+        // The jsonb aggregates. ORDER BY inside the call is not supported.
+        "jsonb_agg",
+        "json_agg",
+        "jsonb_object_agg",
+        "json_object_agg",
         // Array functions: cardinality and array_length give the length of an array(T) value, and
         // array_contains tells whether it holds a value.
         "cardinality",
@@ -494,6 +563,31 @@ internal static class SqlVocabulary
         // generate_series(start, stop [, step]) is a table function: it goes in FROM, not in a select
         // list.
         "generate_series",
+        // The jsonb table functions, which also go in FROM: jsonb_each(doc) gives key and value rows,
+        // and jsonb_array_elements(doc) gives one value row for each element.
+        "jsonb_each",
+        "json_each",
+        "jsonb_each_text",
+        "json_each_text",
+        "jsonb_object_keys",
+        "json_object_keys",
+        "jsonb_array_elements",
+        "json_array_elements",
+        "jsonb_array_elements_text",
+        "json_array_elements_text",
+        // Window functions. Each one needs an OVER clause. count, sum, avg, min and max also take one,
+        // and are listed above as aggregates.
+        "row_number",
+        "rank",
+        "dense_rank",
+        "percent_rank",
+        "cume_dist",
+        "ntile",
+        "lag",
+        "lead",
+        "first_value",
+        "last_value",
+        "nth_value",
     ];
 
     internal static readonly string[] Commands = [

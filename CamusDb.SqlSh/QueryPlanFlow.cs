@@ -196,8 +196,12 @@ internal static class QueryPlanFlow
         if (Describe(node.Operator) is string description)
             content.Add(new Markup($"[grey]{Markup.Escape(description)}[/]"));
 
+        // A window node joins its entries, one for each (PARTITION BY, ORDER BY) and so one sort,
+        // with "; ". Each entry gets its own line, so the sorts can be counted.
         if (node.Detail.Length > 0)
-            content.Add(new Text(node.Detail));
+            content.Add(new Text(string.Equals(node.Operator, "window", StringComparison.OrdinalIgnoreCase)
+                ? node.Detail.Replace("; ", "\n", StringComparison.Ordinal)
+                : node.Detail));
 
         if (inlineSide && node.SideInput is not null)
         {
@@ -402,7 +406,9 @@ internal static class QueryPlanFlow
         "index-lookup" => "Finds the rows for one exact index key.",
         "index-range-scan" => "Reads a range of keys from an index.",
         "index-in-list" => "Looks up each value of an IN list in an index.",
+        "gin-scan" => "Finds the candidate rows for a jsonb condition in a GIN index. The filter checks each one.",
         "derived-table-scan" => "Reads the rows of a subquery in FROM.",
+        "window" => "Sorts the rows once for each PARTITION BY and ORDER BY, and computes the window functions.",
         "function-scan" => "Makes rows with a function in FROM, without reading a table.",
         "constant-source" => "Makes one row without reading a table.",
         "filter" => "Keeps only the rows that match the condition.",
