@@ -110,10 +110,25 @@ internal sealed class ShellSession
             return;
         }
 
+        // `\l` is SHOW DATABASES under its psql name, so it needs no database either.
+        if (IsListDatabasesCommand(sql))
+        {
+            await ExecuteStatement("show databases", vertical);
+            return;
+        }
+
         bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
         if (needsDb && !HasDatabase(ConnectionString))
         {
             AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
+            return;
+        }
+
+        // `\d` and its family describe the objects of the current database, so they come after the
+        // no-database check. They run outside the open transaction, as the catalog needs none.
+        if (IsDescribeCommand(sql, out DescribeRequest describeRequest))
+        {
+            await DescribeCommand.ExecuteAsync(Connection, describeRequest);
             return;
         }
 

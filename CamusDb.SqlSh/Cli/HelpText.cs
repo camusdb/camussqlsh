@@ -96,6 +96,13 @@ internal static class HelpText
         AnsiConsole.MarkupLine("                                [cyan]`backticked`[/]. Works in script files too");
         AnsiConsole.MarkupLine("  [cyan]source[/] <file> [[--force]]     Run the statements in a file, streaming it;");
         AnsiConsole.MarkupLine("                                [cyan]--force[/] carries on past failures");
+        AnsiConsole.MarkupLine("  [cyan]\\d[/] [[name]]                   List the tables, views, materialized views and sequences;");
+        AnsiConsole.MarkupLine("                                with a name, describe it. [cyan]\\d+[/] adds comments and");
+        AnsiConsole.MarkupLine("                                view definitions. Names take [cyan]*[/] and [cyan]?[/] wildcards");
+        AnsiConsole.MarkupLine("  [cyan]\\dt[/] [cyan]\\dv[/] [cyan]\\dm[/] [cyan]\\ds[/] [cyan]\\di[/] [[pattern]]");
+        AnsiConsole.MarkupLine("                                List the tables, views, materialized views, sequences");
+        AnsiConsole.MarkupLine("                                or indexes; the letters combine, as in [cyan]\\dtv[/]");
+        AnsiConsole.MarkupLine("  [cyan]\\l[/]                          List the databases, like [cyan]show databases[/]");
         AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
         AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");
         AnsiConsole.MarkupLine("  [cyan]\\plan[/] [[flow|table]]          How EXPLAIN shows a plan: a flow from the source to");

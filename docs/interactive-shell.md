@@ -11,6 +11,9 @@ The shell runs these commands itself. All other text goes to the server as SQL.
 | --- | --- |
 | `use <database>` | Make `<database>` the current database. |
 | `source <file> [--force]` | Run a file of statements. See [Scripting](scripting.md#script-files). |
+| `\d [name]`, `\d+ [name]` | List the relations, or describe one. See [Describing objects](#describing-objects). |
+| `\dt`, `\dv`, `\dm`, `\ds`, `\di [pattern]` | List the tables, views, materialized views, sequences or indexes. |
+| `\l` | List the databases. This is the same as `show databases`. |
 | `show prepared [sql]`, `\prepared` | Show the statements that the driver keeps prepared. |
 | `\plan [flow\|table]` | Set how `EXPLAIN` shows a plan. See [Query plans](output.md#query-plans-explain). |
 | `\export csv\|json\|yaml [to <file>] <query>` | Write the rows of a query to a file. See [Exporting](output.md#exporting-a-result-set). |
@@ -19,7 +22,7 @@ The shell runs these commands itself. All other text goes to the server as SQL.
 | `help`, `\h`, `\?`, `?`, `/help` | List the shell commands. |
 | `exit`, `quit`, `\q`, `/quit`, `/exit` | Leave the shell. |
 
-A `/` prefix is the same as `\` for `\plan` and `\export`.
+A `/` prefix is the same as `\` for `\d`, `\l`, `\plan` and `\export`.
 
 ## Switching databases
 
@@ -31,6 +34,60 @@ use `order details`;
 `use` opens the connection again with the new database. Quote a name that is a keyword or that
 has spaces, with backticks or double quotes. `use` works at the prompt, in script files, with `-e`
 and with `-f`. The shell refuses `use` in an open transaction.
+
+## Describing objects
+
+The `\d` commands work like the psql commands of the same names. The shell builds each answer from
+`SHOW` statements.
+
+| Command | Result |
+| --- | --- |
+| `\d` | A list of the tables, views, materialized views and sequences. |
+| `\d <name>` | A description of the object. |
+| `\d+ <name>` | The same description, with the comments and the view definition. |
+| `\dt`, `\dv`, `\dm`, `\ds`, `\di` | A list of the tables, views, materialized views, sequences or indexes. |
+
+The letters combine: `\dtv` lists the tables and the views. A name or a pattern can have the `*`
+and `?` wildcards. The match is not case-sensitive. Put a name in backticks to match it with no
+wildcards. A pattern after `\di` matches the index names.
+
+```text
+camus> \d robots
+Table "robots"
+┌──────────┬─────────┬──────────┬─────────┐
+│ Column   │ Type    │ Nullable │ Default │
+├──────────┼─────────┼──────────┼─────────┤
+│ id       │ OID     │ not null │         │
+│ name     │ STRING  │ not null │         │
+│ year     │ INT64   │          │ 2024    │
+│ owner_id │ OID     │          │         │
+│ price    │ FLOAT64 │          │         │
+└──────────┴─────────┴──────────┴─────────┘
+Indexes:
+    "~pk" PRIMARY KEY (id)
+    "~fk_robots_owner_id_fkey" (owner_id)
+    "robots_name_idx" UNIQUE (name)
+    "robots_year_idx" (year) INCLUDE (price)
+Foreign-key constraints:
+    "robots_owner_id_fkey" FOREIGN KEY (owner_id) REFERENCES owners (id)
+```
+
+The description of each kind of object has these parts:
+
+- A table: the columns, the indexes, the check constraints and the foreign keys. `\d+` adds the
+  column comments, the table comment and the `WITH` options.
+- A view: the columns. `\d+` adds the view definition.
+- A materialized view: the columns, the indexes, and the status of its data. `\d+` adds the view
+  definition.
+- A sequence: its settings and the column that owns it. `\d+` adds the comment.
+
+The `\d` commands need a current database. They work at the prompt, in script files and with `-e`.
+They always write tables, also with `--format json` or `--format yaml`. For rows that a program
+reads, use the `SHOW` statements. See
+[Inspecting the database](https://camusdb.github.io/docs/sql-inspection/).
+
+`\d` does not show the foreign keys of other tables that point to a table. It also does not show
+triggers.
 
 ## Transactions
 
@@ -96,6 +153,7 @@ valid table or column name.
 | After | Suggestions |
 | --- | --- |
 | `from`, `into`, `update`, `join`, `table`, `view`, `desc`, `describe`, `truncate`, `references` | Tables and views of the current database. |
+| `\d`, `\d+`, as the first word | Tables, views and sequences. |
 | `show statistics for`, `create trigger <name> on`, `drop trigger <name> on` | Tables. |
 | `create index <name> on`, `drop index <name> on` (also with `unique`, `inverted`, `if [not] exists`) | Tables. |
 | `show ranges from index` | `table@index`. |

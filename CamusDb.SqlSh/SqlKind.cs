@@ -198,6 +198,49 @@ internal static class SqlKind
         return IsSlashCommand(sql, "export", out arguments);
     }
 
+    // The shell's psql-style `\d` family (or `/d`): `\d` lists the relations, `\d <name>` describes one,
+    // and `\dt`, `\dv`, `\dm`, `\ds` and `\di` list the tables, views, materialized views, sequences and
+    // indexes. The letters combine, as in `\dtv`. A `+` after the letters, as in `\d+ robots`, adds the
+    // comments and the view definitions. The pattern takes `*` and `?` wildcards. The letters are
+    // case-sensitive, as in psql.
+    internal static bool IsDescribeCommand(string sql, out DescribeRequest request)
+    {
+        request = default;
+
+        Match match = Regex.Match(
+            sql.Trim().TrimEnd(';').Trim(),
+            """^[\\/]d(?<kinds>[tvmsi]*)(?<verbose>\+?)(?:\s+(?<pattern>\S.*))?$""",
+            RegexOptions.Singleline);
+
+        if (!match.Success)
+            return false;
+
+        RelationKinds kinds = RelationKinds.None;
+
+        foreach (char letter in match.Groups["kinds"].Value)
+        {
+            kinds |= letter switch
+            {
+                't' => RelationKinds.Tables,
+                'v' => RelationKinds.Views,
+                'm' => RelationKinds.MaterializedViews,
+                's' => RelationKinds.Sequences,
+                _ => RelationKinds.Indexes,
+            };
+        }
+
+        string? pattern = match.Groups["pattern"].Success ? match.Groups["pattern"].Value.Trim() : null;
+
+        request = new DescribeRequest(kinds, match.Groups["verbose"].Value.Length > 0, pattern);
+        return true;
+    }
+
+    // The psql-style `\l` (or `/l`), which lists the databases like SHOW DATABASES.
+    internal static bool IsListDatabasesCommand(string sql)
+    {
+        return Regex.IsMatch(sql.Trim().TrimEnd(';').Trim(), """^[\\/]l\+?$""");
+    }
+
     // A shell command that starts with a backslash, the psql way, or with a slash, the way other
     // clients spell it: `\plan` and `/plan` are the same command. `arguments` is the text after the
     // name, empty when there is none.

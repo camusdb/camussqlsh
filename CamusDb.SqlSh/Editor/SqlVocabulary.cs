@@ -606,6 +606,14 @@ internal static class SqlVocabulary
     // The shell's own commands that start with a '\\' or a '/'. They are colored like the commands
     // above, but completion does not offer them.
     internal static readonly string[] SlashCommands = [
+        "\\d",
+        "\\dt",
+        "\\dv",
+        "\\dm",
+        "\\ds",
+        "\\di",
+        "\\l",
+        "/d",
         "\\export",
         "/export",
         "\\plan",

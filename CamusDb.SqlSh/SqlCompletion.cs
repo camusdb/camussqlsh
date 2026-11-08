@@ -123,10 +123,23 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsTriggerTypeContext(prefix) && _triggerTypes.Length > 0)
             return _triggerTypes;
 
+        if (IsDescribeContext(prefix) && _tables.Length + _sequences.Length > 0)
+            return [.. _tables, .. _sequences];
+
         if (IsTableContext(prefix) && _tables.Length > 0)
             return _tables;
 
         return _staticWords;
+    }
+
+    // The name after the shell's `\d` or `\d+` (or `/d`, `/d+`): any relation, a sequence too. Only
+    // as the first word, since the command must start the line.
+    private static bool IsDescribeContext(string prefix)
+    {
+        if (TokenFromEnd(prefix, 1).Length > 0)
+            return false;
+
+        return LastToken(prefix) is "\\d" or "\\d+" or "/d" or "/d+";
     }
 
     private static bool IsTableContext(string prefix)
