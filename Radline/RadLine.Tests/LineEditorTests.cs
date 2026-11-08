@@ -48,6 +48,55 @@ namespace RadLine.Tests
             result.ShouldBe($"Patrik{Environment.NewLine}Svensson");
         }
 
+        private static bool HasOpenQuote(string text) => text.Split('\'').Length % 2 == 0;
+
+        [Fact]
+        public async Task Should_Add_New_Line_When_Pressing_Enter_On_Incomplete_Input()
+        {
+            // Given
+            var editor = new LineEditor(
+                new TestConsole(),
+                new TestInputSource()
+                    .Push("select '")
+                    .PushEnter()
+                    .Push("Id' from t")
+                    .PushEnter())
+            {
+                MultiLine = true,
+                IsInputIncomplete = HasOpenQuote,
+            };
+
+            // When
+            var result = await editor.ReadLine(CancellationToken.None);
+
+            // Then
+            result.ShouldBe($"select '{Environment.NewLine}Id' from t");
+        }
+
+        [Fact]
+        public async Task Should_Join_Back_To_First_Line_When_Pressing_Backspace_After_Enter_On_Incomplete_Input()
+        {
+            // Given
+            var editor = new LineEditor(
+                new TestConsole(),
+                new TestInputSource()
+                    .Push("select '")
+                    .PushEnter()
+                    .Push(ConsoleKey.Backspace)
+                    .Push("Id' from t")
+                    .PushEnter())
+            {
+                MultiLine = true,
+                IsInputIncomplete = HasOpenQuote,
+            };
+
+            // When
+            var result = await editor.ReadLine(CancellationToken.None);
+
+            // Then
+            result.ShouldBe("select 'Id' from t");
+        }
+
         [Fact]
         public async Task Should_Move_Between_Lines_When_Pressing_Up_And_Down_In_Multiline_Input()
         {

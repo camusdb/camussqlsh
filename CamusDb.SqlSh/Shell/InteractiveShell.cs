@@ -37,7 +37,14 @@ internal sealed class InteractiveShell
         // Deliver Ctrl+C to the line editor as input instead of killing the process, so the editor can
         // clear a non-empty prompt on the first press and only exit when the prompt is already empty.
         if (session.LineEditor is not null)
+        {
             Console.TreatControlCAsInput = true;
+
+            // Enter on a statement that is not whole yet (an open quote or parenthesis, a trailing
+            // comma) adds a line in the same editor, so Backspace can still go back to the earlier
+            // lines. The pendingSql path below stays for input that ends the editor anyway.
+            session.LineEditor.IsInputIncomplete = IsEditorInputIncomplete;
+        }
 
         while (true)
         {
@@ -130,6 +137,18 @@ internal sealed class InteractiveShell
                 }
             }
         }
+    }
+
+    private bool IsEditorInputIncomplete(string text)
+    {
+        // Fold smart quotes the way the loop does, so a curly quote counts as a quote here too.
+        string folded = new SmartQuoteFolder().Fold(text);
+
+        string combined = pendingSql.Length == 0
+            ? folded
+            : $"{pendingSql}{Environment.NewLine}{folded}";
+
+        return SqlScript.IsIncomplete(combined);
     }
 
     private enum PromptCommand
