@@ -14,7 +14,7 @@ using System.Text;
 public readonly record struct SqlStatement(string Sql, bool Vertical, int Line, int Start = 0, int End = 0);
 
 // Splits SQL text into statements, tracking where a ';' actually terminates one: not inside a
-// string, a `quoted identifier`, or a comment. Holding the state in an object (rather than
+// string, a `quoted identifier`, a $$ dollar-quoted text $$, or a comment. Holding the state in an object (rather than
 // re-scanning a whole string) lets callers feed a file line by line instead of loading it whole,
 // and lets the prompt ask whether what's been typed so far is finished.
 public sealed class SqlScanner
@@ -23,6 +23,11 @@ public sealed class SqlScanner
 
     private bool inSingleQuote, inDoubleQuote, inBacktick, inLineComment, inBlockComment;
     private int parenDepth;
+
+    // The quote that opened the dollar-quoted text the scanner is in ($$ or $tag$), or null. The
+    // text up to the same quote is raw: the C# body of CREATE FUNCTION holds semicolons, quotes and
+    // comments that are not SQL.
+    private string? dollarQuote;
 
     // The line the scanner is reading, and the one the pending statement's first real character
     // sat on — leading blank lines and comments shouldn't shift the reported location.
@@ -38,8 +43,11 @@ public sealed class SqlScanner
     private bool hasContent;
     private char lastContentChar;
 
-    /// <summary>Inside a string literal or a quoted identifier, so the statement can't be over.</summary>
-    public bool InsideQuotes => inSingleQuote || inDoubleQuote || inBacktick;
+    /// <summary>
+    /// Inside a string literal, a quoted identifier or a dollar-quoted text, so the statement can't
+    /// be over.
+    /// </summary>
+    public bool InsideQuotes => inSingleQuote || inDoubleQuote || inBacktick || dollarQuote is not null;
 
     /// <summary>Inside an unterminated /* … */. A line comment self-terminates, so it doesn't count.</summary>
     public bool InsideBlockComment => inBlockComment;
@@ -53,9 +61,10 @@ public sealed class SqlScanner
     public char LastContentChar => lastContentChar;
 
     /// <summary>
-    /// Consumes a chunk of SQL and yields whatever statements it completed. Two-character tokens
-    /// (--, /*, */, \G, doubled quotes) are looked up within the chunk, so callers must not split a
-    /// chunk mid-token; feeding whole lines is always safe, since none of them can span a newline.
+    /// Consumes a chunk of SQL and yields whatever statements it completed. Multi-character tokens
+    /// (--, /*, */, \G, doubled quotes, $tag$) are looked up within the chunk, so callers must not
+    /// split a chunk mid-token; feeding whole lines is always safe, since none of them can span a
+    /// newline.
     /// </summary>
     public IEnumerable<SqlStatement> Feed(string text)
     {
@@ -87,6 +96,24 @@ public sealed class SqlScanner
                     inBlockComment = false;
                 }
 
+                continue;
+            }
+
+            // Dollar-quoted text has no escape and no comment. Only the quote that opened it ends it,
+            // so in $fn$ … $fn$ a $$ is text.
+            if (dollarQuote is not null)
+            {
+                if (c == '$' && string.CompareOrdinal(text, i, dollarQuote, 0, dollarQuote.Length) == 0)
+                {
+                    foreach (char q in dollarQuote)
+                        Append(q, content: true);
+
+                    i += dollarQuote.Length - 1;
+                    dollarQuote = null;
+                    continue;
+                }
+
+                Append(c, content: true);
                 continue;
             }
 
@@ -152,6 +179,16 @@ public sealed class SqlScanner
                 continue;
             }
 
+            if (c == '$' && DollarQuoteAt(text, i) is { } quote)
+            {
+                foreach (char q in quote)
+                    Append(q, content: true);
+
+                i += quote.Length - 1;
+                dollarQuote = quote;
+                continue;
+            }
+
             if (c is '\'' or '"' or '`')
             {
                 inSingleQuote = c == '\'';
@@ -205,6 +242,24 @@ public sealed class SqlScanner
             return false;
 
         return next != '-' || (i + 2 < text.Length && text[i + 2] == '-');
+    }
+
+    /// <summary>
+    /// The dollar quote that starts at <paramref name="start"/>: <c>$$</c>, or <c>$</c>, an identifier
+    /// and <c>$</c>, as in <c>$fn$</c>. Null when the <c>$</c> there starts no quote. The rule is the
+    /// server lexer's: an identifier never holds a <c>$</c>, so no character before the quote matters.
+    /// </summary>
+    internal static string? DollarQuoteAt(string text, int start)
+    {
+        int i = start + 1;
+
+        if (i < text.Length && (char.IsAsciiLetter(text[i]) || text[i] == '_'))
+        {
+            while (i < text.Length && (char.IsAsciiLetterOrDigit(text[i]) || text[i] == '_'))
+                i++;
+        }
+
+        return i < text.Length && text[i] == '$' ? text[start..(i + 1)] : null;
     }
 
     /// <summary>Yields a final statement left unterminated at the end of the input, if any.</summary>

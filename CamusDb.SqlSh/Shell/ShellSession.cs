@@ -132,6 +132,13 @@ internal sealed class ShellSession
             return;
         }
 
+        // `\df` lists the inline functions of the current database, so it needs one too.
+        if (IsDescribeFunctionsCommand(sql, out bool functionsVerbose, out string? functionsPattern))
+        {
+            await DescribeCommand.ListFunctionsAsync(Connection, functionsVerbose, functionsPattern);
+            return;
+        }
+
         if (IsSystemLevelQuery(sql))
             await ExecuteQuery(await OpenEndpointConnectionAsync(), sql, vertical);
         else if (IsQueryable(sql))
@@ -159,8 +166,8 @@ internal sealed class ShellSession
         ConnectionString = SwapDatabase(ConnectionString, database);
         Connection = await ConnectionHelper.OpenAsync(ConnectionString);
 
-        if (Completion is not null)
-            await Completion.RefreshTablesAsync(Connection);
+        if (editor is not null)
+            await editor.RefreshDatabaseVocabularyAsync(Connection);
 
         AnsiConsole.MarkupLine("Database changed to [cyan]{0}[/]\n", Markup.Escape(database));
     }
@@ -181,6 +188,19 @@ internal sealed class ShellSession
 
         Transaction = null;
         return true;
+    }
+
+    // Loads again the names of the current database that the editor completes and colors: the
+    // relations, the sequences and the inline functions. Does nothing without the rich editor.
+    public Task RefreshDatabaseVocabularyAsync()
+    {
+        return editor?.RefreshDatabaseVocabularyAsync(Connection) ?? Task.CompletedTask;
+    }
+
+    // Loads again the inline function names only, after a CREATE or DROP FUNCTION.
+    public Task RefreshFunctionVocabularyAsync()
+    {
+        return editor?.RefreshInlineFunctionsAsync(Connection) ?? Task.CompletedTask;
     }
 
     // Records a statement typed at the prompt: in the editor's history for Up, and in the history file.

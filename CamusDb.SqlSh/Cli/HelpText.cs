@@ -102,6 +102,8 @@ internal static class HelpText
         AnsiConsole.MarkupLine("  [cyan]\\dt[/] [cyan]\\dv[/] [cyan]\\dm[/] [cyan]\\ds[/] [cyan]\\di[/] [[pattern]]");
         AnsiConsole.MarkupLine("                                List the tables, views, materialized views, sequences");
         AnsiConsole.MarkupLine("                                or indexes; the letters combine, as in [cyan]\\dtv[/]");
+        AnsiConsole.MarkupLine("  [cyan]\\df[/] [[pattern]]              List the inline functions of the current database;");
+        AnsiConsole.MarkupLine("                                [cyan]\\df+[/] adds the compile state and the source");
         AnsiConsole.MarkupLine("  [cyan]\\l[/]                          List the databases, like [cyan]show databases[/]");
         AnsiConsole.MarkupLine("  [cyan]show prepared[/] [[sql]]         What the driver keeps prepared; with SQL, whether that");
         AnsiConsole.MarkupLine("                                statement is prepared (alias: [cyan]\\prepared[/])");

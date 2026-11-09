@@ -36,6 +36,12 @@ internal static class ErrorReporter
             case "CADB0519":
                 AnsiConsole.MarkupLine("[grey58]The server requires TLS for credential-bearing requests. Use an[/] [cyan]https://[/] [grey58]endpoint.[/]");
                 break;
+
+            // An inline function body that does not compile, or that uses a refused type or member.
+            // Each finding names a line and a column of the body, not of the statement.
+            case "CADB0838" or "CADB0839":
+                WriteBodyCarets(sql, ex.Message);
+                break;
         }
 
         AnsiConsole.WriteLine();
@@ -92,18 +98,154 @@ internal static class ErrorReporter
         if (line < 1 || line > lines.Length)
             return;
 
-        string source = lines[line - 1];
+        AnsiConsole.WriteLine();
 
-        // Columns are 1-based; clamp into the line so a caret always renders.
-        int caret = Math.Clamp(col - 1, 0, source.Length);
+        // Columns are 1-based.
+        WriteCaret(lines[line - 1], col - 1, note: null);
+    }
+
+    // The most findings of one inline function that get a caret. The message names all of them.
+    private const int MaxBodyCarets = 3;
+
+    // A failed CREATE FUNCTION names each problem as "(line,column): message", where line 1 is the
+    // text right after the opening $$. The positions are moved to the statement, so the caret
+    // lands under the body text that the user typed:
+    //
+    //     Function 'slugify' does not compile: (2,12): CS0103: The name 'z' does not exist …
+    //
+    //       return z.Trim();
+    //              ^ CS0103: The name 'z' does not exist in the current context
+    private static void WriteBodyCarets(string? sql, string message)
+    {
+        if (string.IsNullOrEmpty(sql))
+            return;
+
+        Match head = Regex.Match(
+            message,
+            @"Function '(?<name>[^']+)' (?:does not compile|is refused): (?<findings>\(\d+,\d+\): .*)$",
+            RegexOptions.Singleline);
+
+        if (!head.Success)
+            return;
+
+        string? statement = FindCreateFunction(sql, head.Groups["name"].Value);
+
+        if (statement is null || FindDollarBody(statement) is not int bodyStart)
+            return;
+
+        string[] lines = statement.Split('\n');
+
+        // The line and the column of the first character of the body, both 0-based.
+        int bodyLine = statement.AsSpan(0, bodyStart).Count('\n');
+        int bodyColumn = bodyStart - (statement.LastIndexOf('\n', Math.Max(0, bodyStart - 1)) + 1);
+
+        MatchCollection findings = Regex.Matches(
+            head.Groups["findings"].Value,
+            @"\((?<line>\d+),(?<col>\d+)\): (?<text>.*?)(?=; \(\d+,\d+\): |$)",
+            RegexOptions.Singleline);
+
+        int written = 0;
+        int lastTarget = -1;
+
+        foreach (Match finding in findings)
+        {
+            if (written == MaxBodyCarets)
+                break;
+
+            if (!int.TryParse(finding.Groups["line"].Value, out int line) || !int.TryParse(finding.Groups["col"].Value, out int col) || line < 1)
+                continue;
+
+            int target = bodyLine + line - 1;
+
+            if (target >= lines.Length)
+                continue;
+
+            int caret = (line == 1 ? bodyColumn : 0) + col - 1;
+
+            if (written == 0)
+                AnsiConsole.WriteLine();
+
+            // Two findings on one line share the source line, and each gets its own caret line.
+            if (target != lastTarget)
+                AnsiConsole.WriteLine("  " + lines[target]);
+
+            WriteCaretLine(lines[target], caret, finding.Groups["text"].Value);
+            lastTarget = target;
+            written++;
+        }
+    }
+
+    // The statement of `sql` that creates the function `name`, with its line breaks as "\n". The
+    // scanner splits the text the way the shell sent it. Its comments are blank, but every line
+    // keeps its place, and the body is raw text.
+    private static string? FindCreateFunction(string sql, string name)
+    {
+        foreach ((string statement, bool _) in SqlKind.EscapeStringIntoLines(sql.Replace("\r\n", "\n")))
+        {
+            Match match = Regex.Match(
+                statement,
+                @"^create\s+(?:or\s+replace\s+)?function\s+`?(?<name>[A-Za-z_][A-Za-z0-9_]*)`?",
+                RegexOptions.IgnoreCase);
+
+            if (match.Success && string.Equals(match.Groups["name"].Value, name, StringComparison.OrdinalIgnoreCase))
+                return statement;
+        }
+
+        return null;
+    }
+
+    // The offset of the first character after the opening dollar quote of a statement, or null when
+    // it has none. A '$' inside a string or a quoted identifier opens no quote.
+    private static int? FindDollarBody(string statement)
+    {
+        char inside = '\0';
+
+        for (int i = 0; i < statement.Length; i++)
+        {
+            char c = statement[i];
+
+            if (inside != '\0')
+            {
+                if (c == '\\' && inside != '`')
+                    i++;
+                else if (c == inside && i + 1 < statement.Length && statement[i + 1] == inside)
+                    i++;
+                else if (c == inside)
+                    inside = '\0';
+
+                continue;
+            }
+
+            if (c is '\'' or '"' or '`')
+                inside = c;
+            else if (c == '$' && SqlScanner.DollarQuoteAt(statement, i) is { } quote)
+                return i + quote.Length;
+        }
+
+        return null;
+    }
+
+    // Writes a source line with a caret under the 0-based column `caret`, and a note after the caret.
+    private static void WriteCaret(string source, int caret, string? note)
+    {
+        AnsiConsole.WriteLine("  " + source);
+        WriteCaretLine(source, caret, note);
+    }
+
+    // Writes the caret line for a source line that is already written.
+    private static void WriteCaretLine(string source, int caret, string? note)
+    {
+        // Clamp into the line so a caret always renders.
+        caret = Math.Clamp(caret, 0, source.Length);
 
         // Preserve tabs in the padding so the caret stays aligned with the source.
         StringBuilder pad = new();
         for (int i = 0; i < caret; i++)
             pad.Append(source[i] == '\t' ? '\t' : ' ');
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.WriteLine("  " + source);
-        AnsiConsole.MarkupLine("  [red]{0}^[/]", pad.ToString());
+        if (string.IsNullOrEmpty(note))
+            AnsiConsole.MarkupLine("  [red]{0}^[/]", pad.ToString());
+        else
+            AnsiConsole.MarkupLine("  [red]{0}^[/] [grey58]{1}[/]", pad.ToString(), Markup.Escape(note));
     }
 }

@@ -33,6 +33,8 @@ The shell reads the file as a stream, so the file size is not important. The she
 statements at semicolons. It ignores a semicolon in:
 
 - Single-quoted and double-quoted strings, and backtick identifiers.
+- `$$ … $$` and `$tag$ … $tag$` dollar-quoted text, the body of `CREATE FUNCTION`. The text is raw
+  up to the same quote: it can hold quotes, semicolons and comments.
 - `--` and `#` line comments, and `/* */` block comments.
 
 `#>`, `#>>` and `#-` are `jsonb` operators, not comments. `#--` is a comment. The shell accepts

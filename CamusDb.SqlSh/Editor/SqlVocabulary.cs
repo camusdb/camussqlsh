@@ -350,6 +350,18 @@ internal static class SqlVocabulary
         // identifiers to the parser and stay usable as names.
         "extension",
         "version",
+        // Inline functions: CREATE [OR REPLACE] FUNCTION <name>(<param> <type>, …) RETURNS <type>
+        // [RETURNS NULL ON NULL INPUT | CALLED ON NULL INPUT] LANGUAGE csharp AS $$ <body> $$,
+        // DROP FUNCTION [IF EXISTS] <name>, ALTER FUNCTION <name> OWNER TO <user>, SHOW FUNCTIONS
+        // and SHOW CREATE FUNCTION <name>. None of these words is reserved to the parser. OR,
+        // REPLACE, NULL, ON, AS, OWNER and TO are listed above for other statements.
+        "function",
+        "functions",
+        "returns",
+        "called",
+        "input",
+        "language",
+        "csharp",
     ];
 
     internal static readonly string[] Functions = [
@@ -612,6 +624,8 @@ internal static class SqlVocabulary
         "\\dm",
         "\\ds",
         "\\di",
+        "\\df",
+        "/df",
         "\\l",
         "/d",
         "\\export",

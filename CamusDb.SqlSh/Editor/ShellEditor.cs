@@ -86,7 +86,10 @@ internal sealed class ShellEditor
             Text = "",
             Prompt = new MyLineNumberPrompt(new Style(foreground: Color.PaleTurquoise1)),
             Completion = sqlCompletion,
-            Highlighter = worldHighlighter
+
+            // The prompt reads each line with the lines above it, so a string, a comment or a $$
+            // function body that spans lines keeps one color. The TUI uses the word highlighter.
+            Highlighter = new SqlHighlighter(worldHighlighter, constantsStyle, constantsStyle, commentStyle)
         };
 
         // Enter submits the statement. To insert a new line without submitting, RadLine binds
@@ -111,12 +114,12 @@ internal sealed class ShellEditor
         return new ShellEditor(editor, worldHighlighter, sqlCompletion);
     }
 
-    // Loads the names that only the server knows: the tables of the current database, the
-    // configuration keys and the functions of the loaded C# extensions.
+    // Loads the names that only the server knows: the tables and the inline functions of the
+    // current database, the configuration keys and the functions of the loaded C# extensions.
     internal async Task LoadServerVocabularyAsync(CamusConnection connection, string connectionString)
     {
         if (HasDatabase(connectionString))
-            await Completion.RefreshTablesAsync(connection);
+            await RefreshDatabaseVocabularyAsync(connection);
 
         // Configuration keys come over the endpoint connection rather than the database one, because the
         // statements they complete need no database either — the keys are offered even in a session that
@@ -138,5 +141,29 @@ internal sealed class ShellEditor
         {
             // Ignored: the shell is already connected, and this cache is a convenience.
         }
+    }
+
+    // Loads the names of the current database again: the relations, the sequences and the inline
+    // functions. The inline function names are colored like the built-in functions.
+    internal async Task RefreshDatabaseVocabularyAsync(CamusConnection connection)
+    {
+        await Completion.RefreshTablesAsync(connection);
+        ColorInlineFunctions();
+    }
+
+    // Loads the inline function names of the current database again, after CREATE or DROP FUNCTION.
+    internal async Task RefreshInlineFunctionsAsync(CamusConnection connection)
+    {
+        await Completion.RefreshInlineFunctionsAsync(connection);
+        ColorInlineFunctions();
+    }
+
+    // The highlighter can only add words. A dropped function stays colored until the shell starts
+    // again, which is harmless: the server refuses a call to it with its own message. The prompt
+    // loop calls this between two reads, when the editor does not render.
+    private void ColorInlineFunctions()
+    {
+        foreach (string function in Completion.InlineFunctions)
+            Highlighter.AddWord(function, FunctionStyle);
     }
 }

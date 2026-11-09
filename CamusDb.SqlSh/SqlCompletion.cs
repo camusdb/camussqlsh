@@ -24,7 +24,10 @@ using RadLine;
 /// names are loaded from "show sequences" with the relation names and offered after
 /// SEQUENCE (ALTER, DROP, SHOW CREATE and COMMENT ON SEQUENCE). The members of the loaded C#
 /// extensions come from "show extensions": procedure names after CALL, trigger types after
-/// EXTERNAL NAME, and function names with the static vocabulary.
+/// EXTERNAL NAME, and function names with the static vocabulary. The inline functions of the
+/// current database come from "show functions", with the relation names: their names are offered
+/// after DROP, ALTER, SHOW CREATE and CREATE OR REPLACE FUNCTION and after `\df`, and with the
+/// static vocabulary everywhere else. LANGUAGE completes to csharp, the one language there is.
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
@@ -70,6 +73,10 @@ internal sealed class SqlCompletion : ITextCompletion
     private volatile string[] _functions = [];
     private volatile string[] _procedures = [];
     private volatile string[] _triggerTypes = [];
+    private volatile string[] _inlineFunctions = [];
+
+    // The languages of CREATE FUNCTION … LANGUAGE <language>.
+    private static readonly string[] FunctionLanguages = ["csharp"];
 
     // The connection the table cache was loaded over, kept so an index list can be fetched later,
     // when the user asks for one. Null until the first refresh, which is also the point before
@@ -92,6 +99,12 @@ internal sealed class SqlCompletion : ITextCompletion
     /// <see cref="RefreshExtensionsAsync"/> runs, and empty for a user who is not a superuser.
     /// </summary>
     public IReadOnlyList<string> ExtensionFunctions => _functions;
+
+    /// <summary>
+    /// The inline functions of the current database. Empty until <see cref="RefreshTablesAsync"/>
+    /// or <see cref="RefreshInlineFunctionsAsync"/> runs with a database selected.
+    /// </summary>
+    public IReadOnlyList<string> InlineFunctions => _inlineFunctions;
 
     private static string[] Vocabulary(IEnumerable<string> words)
     {
@@ -123,6 +136,12 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsTriggerTypeContext(prefix) && _triggerTypes.Length > 0)
             return _triggerTypes;
 
+        if (IsFunctionNameContext(prefix) && _inlineFunctions.Length > 0)
+            return _inlineFunctions;
+
+        if (IsLanguageContext(prefix))
+            return FunctionLanguages;
+
         if (IsDescribeContext(prefix) && _tables.Length + _sequences.Length > 0)
             return [.. _tables, .. _sequences];
 
@@ -140,6 +159,37 @@ internal sealed class SqlCompletion : ITextCompletion
             return false;
 
         return LastToken(prefix) is "\\d" or "\\d+" or "/d" or "/d+";
+    }
+
+    // The name of an inline function that exists: DROP FUNCTION [IF EXISTS] <name>, ALTER FUNCTION
+    // <name>, SHOW CREATE FUNCTION <name> and CREATE OR REPLACE FUNCTION <name>, and the shell's
+    // `\df` and `\df+` as the first word. CREATE FUNCTION names a function that does not exist yet,
+    // so nothing is offered there.
+    private static bool IsFunctionNameContext(string prefix)
+    {
+        if (TokenFromEnd(prefix, 1).Length == 0 && LastToken(prefix) is "\\df" or "\\df+" or "/df" or "/df+")
+            return true;
+
+        int at = SkipIfExists(prefix);
+
+        if (!string.Equals(TokenFromEnd(prefix, at), "function", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string before = TokenFromEnd(prefix, at + 1);
+
+        if (before.Equals("drop", StringComparison.OrdinalIgnoreCase) ||
+            before.Equals("alter", StringComparison.OrdinalIgnoreCase) ||
+            before.Equals("replace", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return before.Equals("create", StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(TokenFromEnd(prefix, at + 2), "show", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // CREATE FUNCTION … LANGUAGE <language>.
+    private static bool IsLanguageContext(string prefix)
+    {
+        return string.Equals(LastToken(prefix), "language", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsTableContext(string prefix)
@@ -456,6 +506,40 @@ internal sealed class SqlCompletion : ITextCompletion
                                   .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
                                   .ToArray();
         }
+
+        await RefreshInlineFunctionsAsync(connection);
+    }
+
+    /// <summary>
+    /// Loads the inline function names of the current database from SHOW FUNCTIONS. A row in the
+    /// <c>unloading</c> state is the code of a dropped or replaced function that a running statement
+    /// still holds, so its name is left out. A failed load (a server that predates inline functions)
+    /// keeps the names that were loaded before.
+    /// </summary>
+    public async Task RefreshInlineFunctionsAsync(CamusConnection connection)
+    {
+        List<string> functions = new();
+
+        bool loaded = await LoadNamesAsync(
+            connection,
+            "show functions",
+            functions,
+            "name",
+            row => Cell(row, "state") is not "unloading",
+            fallbackToFirstColumn: false);
+
+        if (!loaded)
+            return;
+
+        _inlineFunctions = Vocabulary(functions);
+        RebuildStaticWords();
+    }
+
+    // The words offered where no context applies: the static vocabulary and the function names
+    // that the server knows.
+    private void RebuildStaticWords()
+    {
+        _staticWords = Vocabulary(_baseWords.Concat(_functions).Concat(_inlineFunctions));
     }
 
     /// <summary>
@@ -536,7 +620,7 @@ internal sealed class SqlCompletion : ITextCompletion
                                     .Select(t => $"'{t.Replace("'", "''", StringComparison.Ordinal)}'")
                                     .ToArray();
 
-        _staticWords = Vocabulary(_baseWords.Concat(_functions));
+        RebuildStaticWords();
     }
 
     private static IEnumerable<string> SplitList(string? value)

@@ -120,9 +120,11 @@ internal sealed class InteractiveShell
                 await session.ExecuteSql(executableSql, fromPrompt: true);
 
                 if (session.Completion is not null && ChangesTableSet(executableSql) && HasDatabase(session.ConnectionString))
-                    await session.Completion.RefreshTablesAsync(session.Connection);
+                    await session.RefreshDatabaseVocabularyAsync();
                 else if (session.Completion is not null && ChangesIndexSet(executableSql))
                     session.Completion.InvalidateIndexes();
+                else if (session.Completion is not null && ChangesFunctionSet(executableSql) && HasDatabase(session.ConnectionString))
+                    await session.RefreshFunctionVocabularyAsync();
             }
             catch (Exception ex)
             {

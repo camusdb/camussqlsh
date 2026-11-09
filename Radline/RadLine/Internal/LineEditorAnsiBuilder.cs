@@ -81,10 +81,10 @@ namespace RadLine
 
             // Build the buffer
             var width = _console.Profile.Width - prompt.Length - margin - 1;
-            var (line, position) = BuildLineContent(buffer, width, cursorPosition.Value);
+            var (line, position, skip) = BuildLineContent(buffer, width, cursorPosition.Value);
 
             // Build the resulting ANSI
-            var ansi = _console.ToAnsi(BuildHighlightedText(line));
+            var ansi = _console.ToAnsi(BuildHighlightedText(line, state, lineIndex ?? state.LineIndex, skip));
 
             // Need to pad the content?
             if (line.Length < width)
@@ -196,7 +196,8 @@ namespace RadLine
             BuildLine(builder, state, state.Buffer, null);
         }
 
-        private static (string Content, int? Cursor) BuildLineContent(LineBuffer buffer, int width, int position)
+        // The visible part of the line, the cursor in it, and how many characters scroll off at the left.
+        private static (string Content, int? Cursor, int Skip) BuildLineContent(LineBuffer buffer, int width, int position)
         {
             var middleOfList = width / 2;
 
@@ -227,10 +228,11 @@ namespace RadLine
 
             return (
                 string.Concat(buffer.Content.Skip(skip).Take(take)),
-                pointer);
+                pointer,
+                skip);
         }
 
-        private IRenderable BuildHighlightedText(string text)
+        private IRenderable BuildHighlightedText(string text, LineEditorState state, int lineIndex, int skip)
         {
             var highlighter = _accessor.Highlighter;
             if (highlighter == null)
@@ -239,6 +241,31 @@ namespace RadLine
             }
 
             var paragraph = new Paragraph();
+
+            // A line highlighter colors the whole line, so only the visible part of each colored
+            // part is kept.
+            if (highlighter is ILineHighlighter lineHighlighter && lineIndex >= 0 && lineIndex < state.LineCount)
+            {
+                var lines = state.GetBuffers().Select(buffer => buffer.Content).ToList();
+                var end = skip + text.Length;
+                var at = 0;
+
+                foreach (var (part, style) in lineHighlighter.HighlightLine(lines, lineIndex))
+                {
+                    var from = Math.Max(at, skip);
+                    var to = Math.Min(at + part.Length, end);
+
+                    if (from < to)
+                    {
+                        paragraph.Append(part.Substring(from - at, to - from), style);
+                    }
+
+                    at += part.Length;
+                }
+
+                return paragraph;
+            }
+
             foreach (var token in StringTokenizer.Tokenize(text))
             {
                 var style = string.IsNullOrWhiteSpace(token) ? null : highlighter.Highlight(token);

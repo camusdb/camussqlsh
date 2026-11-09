@@ -13,6 +13,7 @@ The shell runs these commands itself. All other text goes to the server as SQL.
 | `source <file> [--force]` | Run a file of statements. See [Scripting](scripting.md#script-files). |
 | `\d [name]`, `\d+ [name]` | List the relations, or describe one. See [Describing objects](#describing-objects). |
 | `\dt`, `\dv`, `\dm`, `\ds`, `\di [pattern]` | List the tables, views, materialized views, sequences or indexes. |
+| `\df [pattern]`, `\df+ [pattern]` | List the inline functions. See [Inline functions](#inline-functions). |
 | `\l` | List the databases. This is the same as `show databases`. |
 | `show prepared [sql]`, `\prepared` | Show the statements that the driver keeps prepared. |
 | `\plan [flow\|table]` | Set how `EXPLAIN` shows a plan. See [Query plans](output.md#query-plans-explain). |
@@ -22,7 +23,7 @@ The shell runs these commands itself. All other text goes to the server as SQL.
 | `help`, `\h`, `\?`, `?`, `/help` | List the shell commands. |
 | `exit`, `quit`, `\q`, `/quit`, `/exit` | Leave the shell. |
 
-A `/` prefix is the same as `\` for `\d`, `\l`, `\plan` and `\export`.
+A `/` prefix is the same as `\` for `\d`, `\df`, `\l`, `\plan` and `\export`.
 
 ## Switching databases
 
@@ -89,6 +90,57 @@ reads, use the `SHOW` statements. See
 `\d` does not show the foreign keys of other tables that point to a table. It also does not show
 triggers.
 
+## Inline functions
+
+An inline function is a SQL scalar function with a C# body in the statement. The server compiles
+the body. See
+[Inline functions](https://github.com/camusdb/camusdb/blob/main/docs/csharp-extensions.md#inline-functions)
+for the rules of the body. Type the statement as you type other SQL:
+
+```sql
+CREATE FUNCTION slugify(s STRING) RETURNS STRING LANGUAGE csharp AS $$
+    // A quote, a semicolon or -- in the body is C#, not SQL.
+    return s.Trim().ToLowerInvariant().Replace(' ', '-');
+$$;
+```
+
+The shell reads the text between `$$` and `$$` as raw text:
+
+- A semicolon, a quote or a comment in the body does not end the statement.
+- `Enter` in an open body adds a line. The statement runs after the closing `$$` and the `;`.
+- The shell does not change curly quotes in the body.
+- A body that holds `$$` takes a quote with a tag, as in `$fn$ ... $fn$`. Only the same tag ends it.
+
+This is also true for script files and `-e`.
+
+`\df` lists the inline functions of the current database. A pattern can have the `*` and `?`
+wildcards. `\df+` adds the generation, the compile state on this node, and the `CREATE FUNCTION`
+statement of each function. It also shows the code of a dropped or replaced function that a
+running statement still holds, with the state `unloading`. For rows that a program reads, use
+`SHOW FUNCTIONS` and `SHOW CREATE FUNCTION`.
+
+```text
+camus> \df
+List of functions
+┌─────────┬───────────┬─────────┬──────────────┬──────────┬───────┐
+│ Name    │ Arguments │ Returns │ Null input   │ Language │ Owner │
+├─────────┼───────────┼─────────┼──────────────┼──────────┼───────┤
+│ slugify │ s STRING  │ STRING  │ returns null │ csharp   │ ada   │
+└─────────┴───────────┴─────────┴──────────────┴──────────┴───────┘
+```
+
+When a body does not compile (`CADB0838`) or uses a type or a member that the server refuses
+(`CADB0839`), the server gives a line and a column in the body. The shell shows a caret under that
+position in the statement, for each of the first three problems:
+
+```text
+CamusException (CADB0838): Function 'broken' does not compile: (2,12): CS0103: The name 'z' does
+not exist in the current context
+
+      return z.Trim();
+             ^ CS0103: The name 'z' does not exist in the current context
+```
+
 ## Transactions
 
 The shell tracks the transaction that `begin` (or `start transaction`) opens:
@@ -124,9 +176,10 @@ See [Prepared Statements](https://camusdb.github.io/docs/prepared-statements/).
 ## Multiline input
 
 `Shift+Enter` starts a new line. A pasted `Enter` is a new line, not a run. The shell also
-continues a statement that has an open quote, an open parenthesis or a trailing comma.
+continues a statement that has an open quote, an open `$$` function body, an open parenthesis or a
+trailing comma.
 
-Semicolons separate statements. A semicolon in a quoted string does not.
+Semicolons separate statements. A semicolon in a quoted string or in a `$$` function body does not.
 
 ## Keyboard shortcuts
 
@@ -143,7 +196,9 @@ Semicolons separate statements. A semicolon in a quoted string does not.
 ## Syntax coloring
 
 The editor colors keywords, functions, shell commands, constants and strings, and comments. The
-word lists follow the server grammar. A colored word that the server does not reserve is still a
+word lists follow the server grammar. The inline functions of the current database are colored as
+functions. A `$$` function body has the color of a string, also when it continues on more lines. A
+string or a `/* */` comment that continues on more lines also keeps its color. A colored word that the server does not reserve is still a
 valid table or column name.
 
 ## Autocompletion
@@ -161,9 +216,12 @@ valid table or column name.
 | `alter table <table> drop index [if exists]` | The indexes of that table. |
 | `alter`, `drop`, `show create`, `comment on` + `sequence` | Sequences. |
 | `set cluster setting`, `reset cluster setting` | Configuration keys. |
+| `drop function [if exists]`, `alter function`, `show create function`, `create or replace function` | Inline functions of the current database. |
+| `\df`, `\df+`, as the first word | Inline functions of the current database. |
+| `language` | `csharp`. |
 | `call`, as the first word | Procedures of the loaded C# extensions. |
 | `external name` | Trigger types of the loaded C# extensions, in quotes. |
-| Any other word | Keywords, functions and shell commands. |
+| Any other word | Keywords, functions (also the inline functions) and shell commands. |
 
 ```sql
 select * from us⇥              -- "users"
@@ -171,8 +229,8 @@ show ranges from index users@⇥ -- "users@by_email", "users@~pk", …
 drop index users.⇥             -- "users.by_email", …
 ```
 
-The shell loads table, view and sequence names at start, after `use`, and after a statement that
-changes the schema. It loads the indexes of a table at the first `Tab` that needs them. If that
+The shell loads table, view, sequence and inline function names at start, after `use`, and after
+a statement that changes the schema. A dropped function stays colored until the shell starts again. It loads the indexes of a table at the first `Tab` that needs them. If that
 load is slow, that `Tab` completes nothing, and the next one uses the loaded names.
 
 The names of C# extensions (functions, procedures, trigger types) load one time, at start, with

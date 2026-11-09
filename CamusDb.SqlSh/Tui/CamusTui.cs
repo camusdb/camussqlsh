@@ -36,11 +36,6 @@ internal sealed class CamusTui
 
     private enum RowKind { Database, Table, Column, Note }
 
-    // What the editor lexer is inside of at a point in the text. A string or a block comment
-    // can continue on the next line, so this state carries from one line to the next.
-    private enum Lex { Code, Single, Double, Backtick, Block }
-
-    private enum TokenKind { Word, Plain, String, Identifier, Comment }
 
     // One entry in the messages area: the outcome of one statement, or an error from paging.
     private sealed record Message(DateTime At, string Sql, string Text, bool Error);
@@ -1587,6 +1582,8 @@ internal sealed class CamusTui
                 await RefreshCatalogAsync();
             else if (ChangesIndexSet(sql))
                 _completion?.InvalidateIndexes();
+            else if (ChangesFunctionSet(sql) && _completion is not null)
+                await _completion.RefreshInlineFunctionsAsync(_connection);
         }
         else if (IsBeginTx(sql))
         {
@@ -2100,15 +2097,15 @@ internal sealed class CamusTui
 
         // A string or a comment that opens above the window colours the lines below it, so the
         // lexer reads every line from the top.
-        Lex state = Lex.Code;
+        SqlLexState state = default;
 
         for (int i = 0; i < _editorTop && i < _lines.Count; i++)
-            Tokenize(_lines[i].Content, ref state);
+            SqlLineLexer.Tokenize(_lines[i].Content, ref state);
 
         for (int i = _editorTop; i < Math.Min(_lines.Count, _editorTop + visible); i++)
         {
             bool onCursor = i == _row && _focus == Pane.Editor;
-            List<(int Start, int Length, TokenKind Kind)> tokens = Tokenize(_lines[i].Content, ref state);
+            List<SqlToken> tokens = SqlLineLexer.Tokenize(_lines[i].Content, ref state);
             rendered.Add(new Markup($"[grey]{i + 1,3}[/]  {RenderLine(_lines[i], tokens, onCursor, _editorLeft, textWidth)}"));
         }
 
@@ -2130,14 +2127,14 @@ internal sealed class CamusTui
     //
     // Tokenizing starts at the beginning of the line even when the window does not, so a
     // keyword that straddles the left edge keeps its colour.
-    private string RenderLine(LineBuffer line, List<(int Start, int Length, TokenKind Kind)> tokens, bool showCursor, int left, int width)
+    private string RenderLine(LineBuffer line, List<SqlToken> tokens, bool showCursor, int left, int width)
     {
         string text = line.Content;
         int cursor = Math.Clamp(line.Position, 0, text.Length);
 
         StringBuilder markup = new();
 
-        foreach ((int start, int length, TokenKind kind) in tokens)
+        foreach ((int start, int length, SqlTokenKind kind) in tokens)
         {
             if (start >= left + width)
                 break;
@@ -2148,9 +2145,9 @@ internal sealed class CamusTui
             // nullable reference or a nullable value type, so this compiles either way.
             string? tag = kind switch
             {
-                TokenKind.String => _stringTag,
-                TokenKind.Identifier => _identifierTag,
-                TokenKind.Comment => _commentTag,
+                SqlTokenKind.String => _stringTag,
+                SqlTokenKind.Identifier => _identifierTag,
+                SqlTokenKind.Comment => _commentTag,
                 _ => _highlighter.Highlight(token) is { } style ? Describe(style) : null,
             };
 
@@ -2178,119 +2175,6 @@ internal sealed class CamusTui
             markup.Append("[black on white] [/]");
 
         return markup.ToString();
-    }
-
-    // Splits one line into tokens to colour. The rules are those of SqlScanner, which splits the
-    // statements that run: a backslash escapes a character in a string but not in a `quoted
-    // identifier`, a doubled delimiter is a literal one, and -- opens a comment only before
-    // white space or the end of the line. `state` comes in as the state at the start of the line
-    // and goes out as the state at its end.
-    private static List<(int Start, int Length, TokenKind Kind)> Tokenize(string text, ref Lex state)
-    {
-        List<(int, int, TokenKind)> tokens = new();
-        int n = text.Length;
-        int i = 0;
-
-        while (i < n)
-        {
-            int start = i;
-
-            if (state == Lex.Code)
-            {
-                char c = text[i];
-                char next = i + 1 < n ? text[i + 1] : '\0';
-
-                if ((c == '-' && next == '-' && (i + 2 >= n || char.IsWhiteSpace(text[i + 2]))) ||
-                    (c == '#' && SqlScanner.IsHashComment(text, i)))
-                {
-                    tokens.Add((i, n - i, TokenKind.Comment));
-                    break;
-                }
-
-                if (c == '/' && next == '*')
-                {
-                    state = Lex.Block;
-                    i += 2;
-                }
-                else if (c is '\'' or '"' or '`')
-                {
-                    state = c == '\'' ? Lex.Single : c == '"' ? Lex.Double : Lex.Backtick;
-                    i++;
-                }
-                else if (IsWordChar(c))
-                {
-                    while (i < n && IsWordChar(text[i]))
-                        i++;
-
-                    tokens.Add((start, i - start, TokenKind.Word));
-                    continue;
-                }
-                else
-                {
-                    tokens.Add((start, 1, TokenKind.Plain));
-                    i++;
-                    continue;
-                }
-            }
-
-            // A comment or a quoted text is open here. It opened on this line, or it
-            // continues from the line before.
-            TokenKind kind = state switch
-            {
-                Lex.Block => TokenKind.Comment,
-                Lex.Backtick => TokenKind.Identifier,
-                _ => TokenKind.String,
-            };
-
-            if (state == Lex.Block)
-            {
-                int end = text.IndexOf("*/", i, StringComparison.Ordinal);
-
-                if (end < 0)
-                {
-                    i = n;
-                }
-                else
-                {
-                    i = end + 2;
-                    state = Lex.Code;
-                }
-            }
-            else
-            {
-                char quote = state == Lex.Single ? '\'' : state == Lex.Double ? '"' : '`';
-
-                while (i < n)
-                {
-                    char c = text[i];
-
-                    if (c == '\\' && quote != '`' && i + 1 < n)
-                    {
-                        i += 2;
-                        continue;
-                    }
-
-                    if (c == quote)
-                    {
-                        if (i + 1 < n && text[i + 1] == quote)
-                        {
-                            i += 2;
-                            continue;
-                        }
-
-                        i++;
-                        state = Lex.Code;
-                        break;
-                    }
-
-                    i++;
-                }
-            }
-
-            tokens.Add((start, i - start, kind));
-        }
-
-        return tokens;
     }
 
     // Spectre 0.57.2 exposes no Style-to-markup conversion this build can see, so the

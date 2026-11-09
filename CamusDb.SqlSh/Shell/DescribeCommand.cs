@@ -80,6 +80,101 @@ internal static class DescribeCommand
             await ListAsync(connection, relations, request, stopwatch);
     }
 
+    // `\df [pattern]` and `\df+ [pattern]`: the inline functions of the current database, from SHOW
+    // FUNCTIONS. A row in the `unloading` state is the code of a dropped or replaced function that a
+    // running statement still holds, so it is a detail of the node and only `\df+` shows it. `\df+`
+    // also adds the compile state on this node and the CREATE FUNCTION statement of each function.
+    internal static async Task ListFunctionsAsync(CamusConnection connection, bool verbose, string? pattern)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        Regex? filter = pattern is null ? null : ToRegex(pattern);
+
+        List<Dictionary<string, ColumnValue>> rows = [];
+
+        foreach (Dictionary<string, ColumnValue> row in await QueryAsync(connection, "show functions"))
+        {
+            string name = Text(row, "name") ?? "";
+            bool unloading = string.Equals(Text(row, "state"), "unloading", StringComparison.OrdinalIgnoreCase);
+
+            if (name.Length == 0 || (unloading && !verbose))
+                continue;
+
+            if (filter is null || filter.IsMatch(name))
+                rows.Add(row);
+        }
+
+        if (rows.Count == 0)
+        {
+            if (pattern is null)
+                AnsiConsole.MarkupLine("Did not find any functions.\n");
+            else
+                AnsiConsole.MarkupLine("Did not find any functions named \"{0}\".\n", Markup.Escape(pattern));
+
+            return;
+        }
+
+        Table table = StartTable("List of functions");
+        table.AddColumn("Name");
+        table.AddColumn("Arguments");
+        table.AddColumn("Returns");
+        table.AddColumn("Null input");
+        table.AddColumn("Language");
+        table.AddColumn("Owner");
+
+        if (verbose)
+        {
+            table.AddColumn("Generation");
+            table.AddColumn("State");
+        }
+
+        foreach (Dictionary<string, ColumnValue> row in rows)
+        {
+            List<string> cells =
+            [
+                Markup.Escape(Text(row, "name") ?? ""),
+                Markup.Escape(Text(row, "arguments") ?? ""),
+                Markup.Escape(Text(row, "returns") ?? ""),
+                Markup.Escape(Text(row, "null_input") ?? ""),
+                Markup.Escape(Text(row, "language") ?? ""),
+                Markup.Escape(Text(row, "owner") ?? ""),
+            ];
+
+            if (verbose)
+            {
+                cells.Add(Markup.Escape(Text(row, "generation") ?? ""));
+                cells.Add(Markup.Escape(Text(row, "state") ?? ""));
+            }
+
+            table.AddRow(cells.ToArray());
+        }
+
+        AnsiConsole.Write(table);
+
+        if (verbose)
+        {
+            foreach (Dictionary<string, ColumnValue> row in rows)
+            {
+                if (string.Equals(Text(row, "state"), "unloading", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // A function name is always a plain identifier, so it goes into the statement bare.
+                string name = Text(row, "name")!;
+                List<Dictionary<string, ColumnValue>> created = await QueryAsync(connection, $"show create function {name}");
+                string? statement = created.Count > 0 ? Text(created[0], "create function") : null;
+
+                if (string.IsNullOrEmpty(statement))
+                    continue;
+
+                AnsiConsole.MarkupLine("[bold]Source of \"{0}\":[/]", Markup.Escape(name));
+
+                foreach (string line in statement.Replace("\r\n", "\n").Split('\n'))
+                    AnsiConsole.MarkupLine("    {0}", Markup.Escape(line));
+            }
+        }
+
+        ResultWriter.WriteRowsInSet(rows.Count, stopwatch.Elapsed);
+    }
+
     private static async Task DescribeAsync(CamusConnection connection, List<Relation> relations, DescribeRequest request)
     {
         Regex pattern = ToRegex(request.Pattern!);

@@ -69,21 +69,101 @@ internal static class SqlKind
     /// literals intact; a fresh instance is right for a single self-contained statement. State
     /// survives an unterminated string by design while a script streams in; call <see cref="Reset"/>
     /// when a statement is abandoned so a dangling quote can't stick to later statements.
+    /// The text of a <c>$$ … $$</c> dollar quote, the C# body of CREATE FUNCTION, is never folded:
+    /// a curly quote there is part of a C# string, and the quotes in it do not open SQL strings.
+    /// Comments are not folded either, and a quote or a <c>$$</c> in a comment opens nothing. The
+    /// comment rules are SqlScanner's, which drops the comments before a statement runs.
     /// </summary>
     internal sealed class SmartQuoteFolder
     {
         private char inside;           // the straight delimiter of the string we're in, if any
         private bool openedByFold;     // that string was entered through a folded curly quote
+        private string? dollarQuote;   // the $$ or $tag$ quote of the dollar-quoted text we're in
+        private bool inBlockComment;   // a /* … */ comment, which can span lines
 
-        internal void Reset() => inside = '\0';
+        internal void Reset()
+        {
+            inside = '\0';
+            dollarQuote = null;
+            inBlockComment = false;
+        }
 
         internal string Fold(string input)
         {
             StringBuilder? sb = null;
 
+            // A -- or # comment ends at a line break, or at the end of the input: callers fold one
+            // line, or one whole entry of the prompt, at a time.
+            bool inLineComment = false;
+
             for (int i = 0; i < input.Length; i++)
             {
                 char c = input[i];
+                char next = i + 1 < input.Length ? input[i + 1] : '\0';
+
+                if (inLineComment)
+                {
+                    sb?.Append(c);
+                    inLineComment = c != '\n';
+                    continue;
+                }
+
+                if (inBlockComment)
+                {
+                    sb?.Append(c);
+
+                    if (c == '*' && next == '/')
+                    {
+                        sb?.Append(next);
+                        i++;
+                        inBlockComment = false;
+                    }
+
+                    continue;
+                }
+
+                // Dollar-quoted text is raw up to the quote that opened it (mirrors SqlScanner).
+                if (dollarQuote is not null)
+                {
+                    if (c == '$' && string.CompareOrdinal(input, i, dollarQuote, 0, dollarQuote.Length) == 0)
+                    {
+                        sb?.Append(dollarQuote);
+                        i += dollarQuote.Length - 1;
+                        dollarQuote = null;
+                        continue;
+                    }
+
+                    sb?.Append(c);
+                    continue;
+                }
+
+                // The comment openers of SqlScanner: -- before white space or the end of the text,
+                // a # that is not a jsonb operator, and /*.
+                if (inside == '\0' &&
+                    ((c == '-' && next == '-' && (i + 2 >= input.Length || char.IsWhiteSpace(input[i + 2]))) ||
+                     (c == '#' && SqlScanner.IsHashComment(input, i))))
+                {
+                    sb?.Append(c);
+                    inLineComment = true;
+                    continue;
+                }
+
+                if (inside == '\0' && c == '/' && next == '*')
+                {
+                    sb?.Append(c);
+                    sb?.Append(next);
+                    i++;
+                    inBlockComment = true;
+                    continue;
+                }
+
+                if (inside == '\0' && c == '$' && SqlScanner.DollarQuoteAt(input, i) is { } quote)
+                {
+                    sb?.Append(quote);
+                    i += quote.Length - 1;
+                    dollarQuote = quote;
+                    continue;
+                }
 
                 if (inside != '\0')
                 {
@@ -233,6 +313,21 @@ internal static class SqlKind
 
         request = new DescribeRequest(kinds, match.Groups["verbose"].Value.Length > 0, pattern);
         return true;
+    }
+
+    // The psql-style `\df [pattern]` (or `/df`), which lists the inline functions of the current
+    // database from SHOW FUNCTIONS. `\df+` adds the compile state and the source of each function.
+    internal static bool IsDescribeFunctionsCommand(string sql, out bool verbose, out string? pattern)
+    {
+        Match match = Regex.Match(
+            sql.Trim().TrimEnd(';').Trim(),
+            """^[\\/]df(?<verbose>\+?)(?:\s+(?<pattern>\S.*))?$""",
+            RegexOptions.Singleline);
+
+        verbose = match.Success && match.Groups["verbose"].Value.Length > 0;
+        pattern = match.Success && match.Groups["pattern"].Success ? match.Groups["pattern"].Value.Trim() : null;
+
+        return match.Success;
     }
 
     // The psql-style `\l` (or `/l`), which lists the databases like SHOW DATABASES.
@@ -585,7 +680,30 @@ internal static class SqlKind
                // keyword of TRUNCATE TABLE <table> is optional.
                trimmedSql.StartsWith("truncate ", StringComparison.InvariantCultureIgnoreCase) ||
                trimmedSql.StartsWith("alter table ", StringComparison.InvariantCultureIgnoreCase) ||
-               IsTriggerDDL(trimmedSql);
+               IsTriggerDDL(trimmedSql) ||
+               IsFunctionDDL(trimmedSql);
+    }
+
+    // Inline function DDL: CREATE [OR REPLACE] FUNCTION … LANGUAGE csharp AS $$ … $$, DROP FUNCTION
+    // and ALTER FUNCTION … OWNER TO. The server dispatches each one as schema DDL of the current
+    // database. FUNCTION, OR REPLACE and OWNER are plain identifiers to the parser, so the prefixes
+    // are matched by words.
+    internal static bool IsFunctionDDL(string sql)
+    {
+        return StartsWithWords(sql, "create", "function") ||
+               StartsWithWords(sql, "create", "or", "replace", "function") ||
+               StartsWithWords(sql, "drop", "function") ||
+               StartsWithWords(sql, "alter", "function");
+    }
+
+    // The function DDL that can add or remove a name, which the completion cache and the
+    // highlighter hold. CREATE OR REPLACE is here, because it creates the function when the name is
+    // new. ALTER FUNCTION … OWNER TO changes no name.
+    internal static bool ChangesFunctionSet(string sql)
+    {
+        return StartsWithWords(sql, "create", "function") ||
+               StartsWithWords(sql, "create", "or", "replace", "function") ||
+               StartsWithWords(sql, "drop", "function");
     }
 
     // Trigger DDL. The server dispatches both as schema DDL: each one commits a replicated change to
