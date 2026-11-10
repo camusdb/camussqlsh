@@ -340,6 +340,10 @@ internal static class SqlVocabulary
         // None of these words is reserved to the parser, so all of them stay usable as table and
         // column names. EXTERNAL is listed above for SET STORAGE.
         "trigger",
+        // SHOW TRIGGERS [ON <table>] and SHOW CREATE TRIGGER <name> ON <table> list the triggers of
+        // both forms. An inline trigger is CREATE TRIGGER … LANGUAGE csharp AS $$ <body> $$, with
+        // the words of the inline functions below.
+        "triggers",
         "before",
         "after",
         "name",

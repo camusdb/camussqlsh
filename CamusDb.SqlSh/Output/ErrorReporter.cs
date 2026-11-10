@@ -37,8 +37,9 @@ internal static class ErrorReporter
                 AnsiConsole.MarkupLine("[grey58]The server requires TLS for credential-bearing requests. Use an[/] [cyan]https://[/] [grey58]endpoint.[/]");
                 break;
 
-            // An inline function body that does not compile, or that uses a refused type or member.
-            // Each finding names a line and a column of the body, not of the statement.
+            // An inline function or inline trigger body that does not compile, or that uses a
+            // refused type or member. Each finding names a line and a column of the body, not of
+            // the statement.
             case "CADB0838" or "CADB0839":
                 WriteBodyCarets(sql, ex.Message);
                 break;
@@ -107,8 +108,8 @@ internal static class ErrorReporter
     // The most findings of one inline function that get a caret. The message names all of them.
     private const int MaxBodyCarets = 3;
 
-    // A failed CREATE FUNCTION names each problem as "(line,column): message", where line 1 is the
-    // text right after the opening $$. The positions are moved to the statement, so the caret
+    // A failed CREATE FUNCTION or CREATE TRIGGER … LANGUAGE csharp names each problem as
+    // "(line,column): message", where line 1 is the text right after the opening $$. The positions are moved to the statement, so the caret
     // lands under the body text that the user typed:
     //
     //     Function 'slugify' does not compile: (2,12): CS0103: The name 'z' does not exist …
@@ -122,13 +123,13 @@ internal static class ErrorReporter
 
         Match head = Regex.Match(
             message,
-            @"Function '(?<name>[^']+)' (?:does not compile|is refused): (?<findings>\(\d+,\d+\): .*)$",
+            @"(?<kind>Function|Trigger) '(?<name>[^']+)' (?:does not compile|is refused): (?<findings>\(\d+,\d+\): .*)$",
             RegexOptions.Singleline);
 
         if (!head.Success)
             return;
 
-        string? statement = FindCreateFunction(sql, head.Groups["name"].Value);
+        string? statement = FindCreateStatement(sql, head.Groups["kind"].Value, head.Groups["name"].Value);
 
         if (statement is null || FindDollarBody(statement) is not int bodyStart)
             return;
@@ -175,17 +176,19 @@ internal static class ErrorReporter
         }
     }
 
-    // The statement of `sql` that creates the function `name`, with its line breaks as "\n". The
-    // scanner splits the text the way the shell sent it. Its comments are blank, but every line
-    // keeps its place, and the body is raw text.
-    private static string? FindCreateFunction(string sql, string name)
+    // The statement of `sql` that creates the function or the trigger `name`, with its line breaks
+    // as "\n". `kind` is "Function" or "Trigger", as the message names it. The scanner splits the
+    // text the way the shell sent it. Its comments are blank, but every line keeps its place, and
+    // the body is raw text.
+    private static string? FindCreateStatement(string sql, string kind, string name)
     {
+        string pattern = kind == "Trigger"
+            ? @"^create\s+trigger\s+`?(?<name>[A-Za-z_][A-Za-z0-9_]*)`?"
+            : @"^create\s+(?:or\s+replace\s+)?function\s+`?(?<name>[A-Za-z_][A-Za-z0-9_]*)`?";
+
         foreach ((string statement, bool _) in SqlKind.EscapeStringIntoLines(sql.Replace("\r\n", "\n")))
         {
-            Match match = Regex.Match(
-                statement,
-                @"^create\s+(?:or\s+replace\s+)?function\s+`?(?<name>[A-Za-z_][A-Za-z0-9_]*)`?",
-                RegexOptions.IgnoreCase);
+            Match match = Regex.Match(statement, pattern, RegexOptions.IgnoreCase);
 
             if (match.Success && string.Equals(match.Groups["name"].Value, name, StringComparison.OrdinalIgnoreCase))
                 return statement;

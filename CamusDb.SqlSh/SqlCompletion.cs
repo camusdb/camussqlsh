@@ -28,6 +28,9 @@ using RadLine;
 /// current database come from "show functions", with the relation names: their names are offered
 /// after DROP, ALTER, SHOW CREATE and CREATE OR REPLACE FUNCTION and after `\df`, and with the
 /// static vocabulary everywhere else. LANGUAGE completes to csharp, the one language there is.
+/// The triggers of the current database come from "show triggers", with the relation names: their
+/// names are offered after DROP TRIGGER and SHOW CREATE TRIGGER, and the ON after such a name
+/// offers the tables that have a trigger of that name.
 /// </summary>
 internal sealed class SqlCompletion : ITextCompletion
 {
@@ -74,6 +77,10 @@ internal sealed class SqlCompletion : ITextCompletion
     private volatile string[] _procedures = [];
     private volatile string[] _triggerTypes = [];
     private volatile string[] _inlineFunctions = [];
+
+    // The triggers of the current database, of both forms, with the table of each one. A trigger
+    // name is unique on its table only, so one name can have more than one table.
+    private volatile (string Name, string Table)[] _triggers = [];
 
     // The languages of CREATE FUNCTION … LANGUAGE <language>.
     private static readonly string[] FunctionLanguages = ["csharp"];
@@ -142,6 +149,12 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsLanguageContext(prefix))
             return FunctionLanguages;
 
+        if (IsTriggerNameContext(prefix) && _triggers.Length > 0)
+            return TriggerNames();
+
+        if (IsTriggerTableContext(prefix, out string trigger) && TriggerTables(trigger) is { Length: > 0 } triggerTables)
+            return triggerTables;
+
         if (IsDescribeContext(prefix) && _tables.Length + _sequences.Length > 0)
             return [.. _tables, .. _sequences];
 
@@ -186,6 +199,51 @@ internal sealed class SqlCompletion : ITextCompletion
                string.Equals(TokenFromEnd(prefix, at + 2), "show", StringComparison.OrdinalIgnoreCase);
     }
 
+    // The name of a trigger that exists: DROP TRIGGER <name> and SHOW CREATE TRIGGER <name>. CREATE
+    // TRIGGER names one that does not exist yet, so nothing is offered there.
+    private static bool IsTriggerNameContext(string prefix)
+    {
+        if (!string.Equals(LastToken(prefix), "trigger", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string before = TokenFromEnd(prefix, 1);
+
+        return before.Equals("drop", StringComparison.OrdinalIgnoreCase) ||
+               (before.Equals("create", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(TokenFromEnd(prefix, 2), "show", StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The ON of DROP TRIGGER <name> ON <table> and SHOW CREATE TRIGGER <name> ON <table>: the tables
+    // that have a trigger of that name. CREATE TRIGGER <name> ON is left to the table context, which
+    // offers every table.
+    private static bool IsTriggerTableContext(string prefix, out string trigger)
+    {
+        trigger = "";
+
+        if (!string.Equals(LastToken(prefix), "on", StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(TokenFromEnd(prefix, 2), "trigger", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        string verb = TokenFromEnd(prefix, 3);
+
+        bool matches = verb.Equals("drop", StringComparison.OrdinalIgnoreCase) ||
+                       (verb.Equals("create", StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(TokenFromEnd(prefix, 4), "show", StringComparison.OrdinalIgnoreCase));
+
+        trigger = matches ? TokenFromEnd(prefix, 1) : "";
+        return matches;
+    }
+
+    private string[] TriggerNames()
+    {
+        return Vocabulary(_triggers.Select(t => t.Name));
+    }
+
+    private string[] TriggerTables(string trigger)
+    {
+        return Vocabulary(_triggers.Where(t => string.Equals(t.Name, trigger, StringComparison.OrdinalIgnoreCase)).Select(t => t.Table));
+    }
+
     // CREATE FUNCTION … LANGUAGE <language>.
     private static bool IsLanguageContext(string prefix)
     {
@@ -211,6 +269,12 @@ internal sealed class SqlCompletion : ITextCompletion
         // two tables by a condition, so the TRIGGER two words back is what decides.
         if (string.Equals(lastToken, "on", StringComparison.OrdinalIgnoreCase) &&
             string.Equals(TokenFromEnd(prefix, 2), "trigger", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // SHOW TRIGGERS ON <table>.
+        if (string.Equals(lastToken, "on", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, 1), "triggers", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(TokenFromEnd(prefix, 2), "show", StringComparison.OrdinalIgnoreCase))
             return true;
 
         // SHOW STATISTICS FOR <table>. FOR on its own says nothing about what comes next — SHOW
@@ -508,6 +572,41 @@ internal sealed class SqlCompletion : ITextCompletion
         }
 
         await RefreshInlineFunctionsAsync(connection);
+        await RefreshTriggersAsync(connection);
+    }
+
+    /// <summary>
+    /// Loads the triggers of the current database, of both forms, from SHOW TRIGGERS. A failed load
+    /// (a server that predates SHOW TRIGGERS) keeps the triggers that were loaded before.
+    /// </summary>
+    public async Task RefreshTriggersAsync(CamusConnection connection)
+    {
+        List<(string Name, string Table)> triggers = new();
+
+        try
+        {
+            using CamusCommand cmd = connection.CreateSelectCommand("show triggers");
+            cmd.CommandTimeout = 10;
+
+            CamusDataReader reader = await cmd.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                Dictionary<string, ColumnValue> row = ConnectionHelper.ReadCurrentRow(reader);
+
+                string? name = Cell(row, "name");
+                string? table = Cell(row, "table");
+
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(table))
+                    triggers.Add((name, table));
+            }
+        }
+        catch
+        {
+            return;
+        }
+
+        _triggers = triggers.ToArray();
     }
 
     /// <summary>

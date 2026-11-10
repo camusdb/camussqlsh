@@ -97,8 +97,9 @@ internal static class HelpText
         AnsiConsole.MarkupLine("  [cyan]source[/] <file> [[--force]]     Run the statements in a file, streaming it;");
         AnsiConsole.MarkupLine("                                [cyan]--force[/] carries on past failures");
         AnsiConsole.MarkupLine("  [cyan]\\d[/] [[name]]                   List the tables, views, materialized views and sequences;");
-        AnsiConsole.MarkupLine("                                with a name, describe it. [cyan]\\d+[/] adds comments and");
-        AnsiConsole.MarkupLine("                                view definitions. Names take [cyan]*[/] and [cyan]?[/] wildcards");
+        AnsiConsole.MarkupLine("                                with a name, describe it, with its triggers. [cyan]\\d+[/] adds");
+        AnsiConsole.MarkupLine("                                comments, view definitions and inline trigger bodies.");
+        AnsiConsole.MarkupLine("                                Names take [cyan]*[/] and [cyan]?[/] wildcards");
         AnsiConsole.MarkupLine("  [cyan]\\dt[/] [cyan]\\dv[/] [cyan]\\dm[/] [cyan]\\ds[/] [cyan]\\di[/] [[pattern]]");
         AnsiConsole.MarkupLine("                                List the tables, views, materialized views, sequences");
         AnsiConsole.MarkupLine("                                or indexes; the letters combine, as in [cyan]\\dtv[/]");

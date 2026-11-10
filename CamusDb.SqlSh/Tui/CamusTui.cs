@@ -1584,6 +1584,8 @@ internal sealed class CamusTui
                 _completion?.InvalidateIndexes();
             else if (ChangesFunctionSet(sql) && _completion is not null)
                 await _completion.RefreshInlineFunctionsAsync(_connection);
+            else if (IsTriggerDDL(sql) && _completion is not null)
+                await _completion.RefreshTriggersAsync(_connection);
         }
         else if (IsBeginTx(sql))
         {

@@ -125,6 +125,8 @@ internal sealed class InteractiveShell
                     session.Completion.InvalidateIndexes();
                 else if (session.Completion is not null && ChangesFunctionSet(executableSql) && HasDatabase(session.ConnectionString))
                     await session.RefreshFunctionVocabularyAsync();
+                else if (session.Completion is not null && IsTriggerDDL(executableSql) && HasDatabase(session.ConnectionString))
+                    await session.Completion.RefreshTriggersAsync(session.Connection);
             }
             catch (Exception ex)
             {

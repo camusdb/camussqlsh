@@ -337,10 +337,70 @@ internal static class DescribeCommand
         WriteSection("Foreign-key constraints:", definition.ForeignKeys);
         WriteSection("Constraints:", definition.OtherConstraints);
 
+        List<Dictionary<string, ColumnValue>> triggers = await LoadTriggersAsync(connection, relation.Name);
+        WriteSection("Triggers:", triggers.Select(t => (Text(t, "name") ?? "", TriggerSummary(t))).ToList());
+
         if (verbose)
         {
             WriteDetail("Description", definition.Comment);
             WriteDetail("Options", definition.Options);
+            await WriteTriggerBodiesAsync(connection, relation.Name, triggers);
+        }
+    }
+
+    // The triggers of a table, in creation order, from SHOW TRIGGERS ON <table>. Empty on a server
+    // that predates SHOW TRIGGERS, so the rest of the description still shows.
+    private static async Task<List<Dictionary<string, ColumnValue>>> LoadTriggersAsync(CamusConnection connection, string table)
+    {
+        try
+        {
+            return await QueryAsync(connection, $"show triggers on {Quote(table)}");
+        }
+        catch (CamusException)
+        {
+            return [];
+        }
+    }
+
+    // One trigger as psql writes it after its name: the timing, the events and the form. An inline
+    // trigger shows its language, and a trigger of an extension shows its CLR type.
+    private static string TriggerSummary(Dictionary<string, ColumnValue> trigger)
+    {
+        string timing = Text(trigger, "timing") ?? "";
+        string events = Text(trigger, "events") ?? "";
+        string form = Text(trigger, "form") ?? "";
+
+        string what = string.Equals(form, "extension", StringComparison.OrdinalIgnoreCase)
+            ? $"EXTERNAL NAME '{(Text(trigger, "type_name") ?? "").Replace("'", "''")}'"
+            : $"LANGUAGE {form}";
+
+        return $"{timing} {events} {what}";
+    }
+
+    // `\d+` writes the CREATE TRIGGER statement of each inline trigger, so its C# body shows. The
+    // statement of a trigger of an extension holds no more than the summary line.
+    private static async Task WriteTriggerBodiesAsync(CamusConnection connection, string table, List<Dictionary<string, ColumnValue>> triggers)
+    {
+        foreach (Dictionary<string, ColumnValue> trigger in triggers)
+        {
+            if (string.Equals(Text(trigger, "form"), "extension", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            string name = Text(trigger, "name") ?? "";
+
+            if (name.Length == 0)
+                continue;
+
+            List<Dictionary<string, ColumnValue>> created = await QueryAsync(connection, $"show create trigger {Quote(name)} on {Quote(table)}");
+            string? statement = created.Count > 0 ? Text(created[0], "create trigger") : null;
+
+            if (string.IsNullOrEmpty(statement))
+                continue;
+
+            AnsiConsole.MarkupLine("[bold]Trigger \"{0}\" definition:[/]", Markup.Escape(name));
+
+            foreach (string line in statement.Replace("\r\n", "\n").Split('\n'))
+                AnsiConsole.MarkupLine("    {0}", Markup.Escape(line));
         }
     }
 

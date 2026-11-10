@@ -706,8 +706,9 @@ internal static class SqlKind
                StartsWithWords(sql, "drop", "function");
     }
 
-    // Trigger DDL. The server dispatches both as schema DDL: each one commits a replicated change to
-    // the table's schema record. TRIGGER is a plain identifier to the parser, so the prefixes are
+    // Trigger DDL, of both forms: CREATE TRIGGER … EXTERNAL NAME '<Type>' and CREATE TRIGGER …
+    // LANGUAGE csharp AS $$ <body> $$. The server dispatches both as schema DDL: each one commits a
+    // replicated change to the table's schema record. TRIGGER is a plain identifier to the parser, so the prefixes are
     // matched by words, and `DROP  TRIGGER` still matches. CALL is not here: it is DML, which
     // writes inside the statement's transaction and reports a row count.
     internal static bool IsTriggerDDL(string sql)
