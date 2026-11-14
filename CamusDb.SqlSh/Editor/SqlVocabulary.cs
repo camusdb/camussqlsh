@@ -95,6 +95,12 @@ internal static class SqlVocabulary
         "uuid",
         "guid",
         "array",
+        // INTERVAL '1 day 2 hours', INTERVAL '3' HOUR, INTERVAL 3 HOUR and CAST(x AS interval). An
+        // interval is an expression type only: a column, a stored value and an index key cannot have
+        // it. The word is a keyword only before a quote, a digit or a parameter, so a column called
+        // interval stays usable. The unit words (year, month, day, hour, minute, second) are listed
+        // below as functions.
+        "interval",
         // NUMERIC (alias DECIMAL): an exact decimal with precision 38 and scale 9. Both words are
         // reserved to the parser. NUMERIC also starts the typed literal NUMERIC '1.23'.
         "numeric",
@@ -120,6 +126,8 @@ internal static class SqlVocabulary
         "between",
         "like",
         "ilike",
+        // x LIKE pattern ESCAPE '!' sets the character that makes the next % or _ a literal one.
+        "escape",
         "add",
         "show",
         "use",
@@ -394,6 +402,8 @@ internal static class SqlVocabulary
         "is_superuser",
         "current_date",
         "date_add",
+        // date_sub(t, n, 'unit') and date_sub(t, INTERVAL n unit) subtract where date_add adds.
+        "date_sub",
         "date_diff",
         "date_part",
         "date_trunc",
@@ -408,6 +418,15 @@ internal static class SqlVocabulary
         "make_timestamp",
         "makedate",
         "last_day",
+        // Interval functions of PostgreSQL. age(a, b) and age(a) give an interval, make_interval builds
+        // one from parts, the justify functions move 24 hours into a day and 30 days into a month, and
+        // date_bin(stride, t, origin) puts t at the start of its bin.
+        "age",
+        "make_interval",
+        "justify_days",
+        "justify_hours",
+        "justify_interval",
+        "date_bin",
         // Date patterns: PostgreSQL to_char and to_timestamp, and MySQL date_format and str_to_date.
         // to_date with two arguments also parses a pattern; it is listed below with the casts.
         "to_char",
@@ -437,9 +456,35 @@ internal static class SqlVocabulary
         "sqrt",
         "pow",
         "power",
+        // Logarithms and the exponential. log(x) is the base-10 logarithm, and log(b, x) uses base b.
+        "ln",
+        "log",
+        "log10",
+        "exp",
         "mod",
         "sign",
         "random",
+        // Trigonometric functions, in the PostgreSQL forms. The names that end in d take or return
+        // degrees, and radians and degrees convert between the two units. pi() takes no arguments.
+        "sin",
+        "cos",
+        "tan",
+        "cot",
+        "asin",
+        "acos",
+        "atan",
+        "atan2",
+        "sind",
+        "cosd",
+        "tand",
+        "cotd",
+        "asind",
+        "acosd",
+        "atand",
+        "atan2d",
+        "radians",
+        "degrees",
+        "pi",
         "round",
         // trunc(x[, n]) cuts a value toward zero at n fraction digits, where round rounds. A NUMERIC
         // stays NUMERIC and is cut exactly.
@@ -456,6 +501,8 @@ internal static class SqlVocabulary
         "strpos",
         "position",
         "replace",
+        // like_escape(x, pattern, escape) is the call that x LIKE pattern ESCAPE escape parses to.
+        "like_escape",
         "regexp_like",
         "regexp_match",
         "regexp_matches",

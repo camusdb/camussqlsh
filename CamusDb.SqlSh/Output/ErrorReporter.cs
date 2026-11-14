@@ -37,6 +37,12 @@ internal static class ErrorReporter
                 AnsiConsole.MarkupLine("[grey58]The server requires TLS for credential-bearing requests. Use an[/] [cyan]https://[/] [grey58]endpoint.[/]");
                 break;
 
+            // The read asked for a snapshot below the revision history that the storage still keeps.
+            // A retry at the same timestamp fails again, so the fix is a new transaction.
+            case "CADB0847":
+                AnsiConsole.MarkupLine("[grey58]The snapshot of this read is older than the history the server still keeps, for example an AS OF SYSTEM TIME older than the retention age. Start a new transaction, or read as of a newer time.[/]");
+                break;
+
             // An inline function or inline trigger body that does not compile, or that uses a
             // refused type or member. Each finding names a line and a column of the body, not of
             // the statement.

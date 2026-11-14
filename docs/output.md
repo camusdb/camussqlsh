@@ -54,6 +54,7 @@ camus-cli demo -e "select id, name from users" --format json | jq '.[].name'
 | `null` | `null` | `null` |
 | `numeric` | string, so that no digit is lost | string |
 | `string`, `uuid`, `date`, `timestamp` | string | string |
+| `interval` (an expression only) | ISO-8601 string, as in `P1DT2H` | string |
 | `bytes` | base64 string, not clipped | `!!binary` |
 | `array` | array | flow sequence (`[1, 2, 3]`) |
 | `jsonb`, `json` | the document itself. A number keeps all its digits. | the document as flow syntax (`{"a": [1, 2]}`) |
