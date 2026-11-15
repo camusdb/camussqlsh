@@ -77,6 +77,14 @@ internal sealed class QueryPlanNode
     public string? Target { get; init; }
 
     /// <summary>
+    /// The CTE (common table expression) that this reader reads, when the statement computes that CTE
+    /// one time: the detail ends with <c>computed_once=&lt;name&gt;</c>. The first reader runs the
+    /// CTE's query and keeps its rows, and every other reader reads the kept rows. Null for any other
+    /// operator, and for a CTE that each reader runs on its own (an inlined CTE).
+    /// </summary>
+    public string? ComputedOnce { get; init; }
+
+    /// <summary>
     /// The name of a join's second input, which has no row of its own in the plan: <c>Right input</c>,
     /// or <c>Subquery</c> for a semi-join or an anti-join. Null for an operator that is not a join.
     /// </summary>
@@ -159,6 +167,7 @@ internal static class QueryPlanParser
     private static readonly Regex RightKey = DetailKey("right");
     private static readonly Regex InnerKey = DetailKey("inner");
     private static readonly Regex RightOrderKey = DetailKey("right-order");
+    private static readonly Regex ComputedOnceKey = DetailKey("computed_once");
 
     /// <summary>
     /// Returns the plan, or null when the columns are not the EXPLAIN shape or no operator row came
@@ -314,6 +323,7 @@ internal static class QueryPlanParser
             Detail = detail,
             Kind = kind,
             Target = kind == PlanNodeKind.Source ? DescribeTarget(name, detail) : null,
+            ComputedOnce = Value(ComputedOnceKey, detail),
             SideInput = side,
             SideDetail = sideDetail,
             EstimatedRows = Long(row, columns, "estimated_rows"),

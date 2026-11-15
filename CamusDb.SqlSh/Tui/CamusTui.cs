@@ -1625,9 +1625,9 @@ internal sealed class CamusTui
                 _transaction = null;
             }
         }
-        else if (IsInsert(sql))
+        else if (IsReturningWrite(sql))
         {
-            log.Add(await InsertAsync(sql, log, token));
+            log.Add(await WriteAsync(sql, log, token));
         }
         else
         {
@@ -1725,11 +1725,11 @@ internal sealed class CamusTui
             : $"{got} rows so far (first in {first}) — scroll for more";
     }
 
-    // An INSERT runs through a reader, so an INSERT … RETURNING can show its rows in the grid. The
-    // server sends a reader with columns only for a RETURNING list. Any other INSERT leaves the grid
-    // as it is and logs the count, as before. The RETURNING rows are already in memory on the client,
-    // so they are read now and the reader closes at once.
-    private async Task<string> InsertAsync(string sql, RunLog log, CancellationToken token)
+    // An INSERT, UPSERT, UPDATE or DELETE runs through a reader, so a RETURNING list can show its rows
+    // in the grid. The server sends a reader with columns only for a RETURNING list. Any other write
+    // leaves the grid as it is and logs the count, as before. The RETURNING rows are already in memory
+    // on the client, so they are read now and the reader closes at once.
+    private async Task<string> WriteAsync(string sql, RunLog log, CancellationToken token)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
 

@@ -226,6 +226,7 @@ valid table or column name.
 | After | Suggestions |
 | --- | --- |
 | `from`, `into`, `update`, `join`, `table`, `view`, `desc`, `describe`, `truncate`, `references` | Tables and views of the current database. |
+| `using` in `delete from <table> [alias] using` | Tables and views of the current database. |
 | `\d`, `\d+`, as the first word | Tables, views and sequences. |
 | `show statistics for`, `create trigger <name> on`, `show triggers on` | Tables. |
 | `drop trigger`, `show create trigger` | Triggers of the current database. |
@@ -243,8 +244,12 @@ valid table or column name.
 | `external name` | Trigger types of the loaded C# extensions, in quotes. |
 | Any other word | Keywords, functions (also the inline functions) and shell commands. |
 
+In a statement that starts with `WITH`, the table suggestions show the CTE (common table
+expression) names of that statement first. A CTE name hides a table with the same name.
+
 ```sql
 select * from us⇥              -- "users"
+with t as (select 1) select * from ⇥ -- "t", then the tables
 show ranges from index users@⇥ -- "users@by_email", "users@~pk", …
 drop index users.⇥             -- "users.by_email", …
 ```

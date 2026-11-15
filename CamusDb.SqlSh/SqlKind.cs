@@ -425,27 +425,36 @@ internal static class SqlKind
 
     // The first word may be followed by any whitespace, so a SELECT on its own line is a query too.
     // A statement that opens with a parenthesis is a set operation over parenthesized operands,
-    // (SELECT …) UNION (SELECT …), the only statement the grammar lets start that way.
+    // (SELECT …) UNION (SELECT …), the only statement the grammar lets start that way. A leading
+    // WITH clause is skipped: WITH s AS (…) SELECT … is a query, and WITH s AS (…) UPDATE … is not.
     internal static bool IsQueryable(string sql)
     {
-        return sql.TrimStart().StartsWith('(') ||
-               StartsWithWords(sql, "select") ||
-               StartsWithWords(sql, "explain") ||
-               StartsWithWords(sql, "analyze") ||
-               StartsWithWords(sql, "show") ||
-               StartsWithWords(sql, "desc") ||
-               StartsWithWords(sql, "describe");
+        string statement = SqlLeadingWith.Skip(sql);
+
+        return statement.StartsWith('(') ||
+               StartsWithWords(statement, "select") ||
+               StartsWithWords(statement, "explain") ||
+               StartsWithWords(statement, "analyze") ||
+               StartsWithWords(statement, "show") ||
+               StartsWithWords(statement, "desc") ||
+               StartsWithWords(statement, "describe");
     }
 
-    // Every INSERT goes through a reader, so an INSERT … RETURNING can show its rows. The server
-    // decides the shape of the result: a reader with columns for a RETURNING list, and a bare
-    // affected-row count for any other INSERT. Thus the shell does not look for the RETURNING
-    // keyword itself, and a `returning` inside a string, a comment or a backtick-quoted name cannot
-    // confuse it. UPSERT INTO is an INSERT with an implied ON CONFLICT clause, and it takes the
-    // same RETURNING list.
-    internal static bool IsInsert(string sql)
+    // Every INSERT, UPSERT, UPDATE and DELETE goes through a reader, so a RETURNING list can show its
+    // rows. ExecuteNonQueryAsync would ask the server to drop them and keep only the count. The
+    // server decides the shape of the result: a reader with columns for a RETURNING list, and a reader
+    // with no columns for any other write. Thus the shell does not look for the RETURNING keyword
+    // itself, and a `returning` inside a string, a comment or a backtick-quoted name cannot confuse it.
+    // UPSERT INTO is an INSERT with an implied ON CONFLICT clause, and it takes the same RETURNING
+    // list. A leading WITH clause is skipped, because the server runs the write after it.
+    internal static bool IsReturningWrite(string sql)
     {
-        return StartsWithWords(sql, "insert") || StartsWithWords(sql, "upsert");
+        string statement = SqlLeadingWith.Skip(sql);
+
+        return StartsWithWords(statement, "insert") ||
+               StartsWithWords(statement, "upsert") ||
+               StartsWithWords(statement, "update") ||
+               StartsWithWords(statement, "delete");
     }
 
     // Collapses a statement onto one line for display, clipping anything past `max` characters.

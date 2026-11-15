@@ -153,8 +153,8 @@ internal sealed class ShellSession
             await ExecuteCommitTx();
         else if (IsRollbackTx(sql))
             await ExecuteRollbackTx();
-        else if (IsInsert(sql))
-            await ExecuteInsert(sql, vertical);
+        else if (IsReturningWrite(sql))
+            await ExecuteWrite(sql, vertical);
         else
             await ExecuteNonQuery(sql);
     }
@@ -355,11 +355,12 @@ internal sealed class ShellSession
         ResultWriter.WriteRowsInSet(rows, duration);
     }
 
-    // Runs an INSERT through a reader rather than ExecuteNonQueryAsync, which asks the server to drop
-    // the rows of a RETURNING list and keep only the count. The server decides the shape: a RETURNING
-    // list gives a reader with columns, and any other INSERT gives a reader with no columns. Either way
-    // RecordsAffected is the inserted-row count, so the footer reads the same as for a plain INSERT.
-    private async Task ExecuteInsert(string sql, bool vertical)
+    // Runs an INSERT, UPSERT, UPDATE or DELETE through a reader rather than ExecuteNonQueryAsync, which
+    // asks the server to drop the rows of a RETURNING list and keep only the count. The server decides
+    // the shape: a RETURNING list gives a reader with columns, and any other write gives a reader with
+    // no columns. Either way RecordsAffected is the written-row count, so the footer reads the same as
+    // for a write without RETURNING.
+    private async Task ExecuteWrite(string sql, bool vertical)
     {
         await using CamusCommand cmd = Connection.CreateCamusCommand(sql);
 

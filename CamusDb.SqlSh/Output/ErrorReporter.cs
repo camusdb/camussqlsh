@@ -43,6 +43,12 @@ internal static class ErrorReporter
                 AnsiConsole.MarkupLine("[grey58]The snapshot of this read is older than the history the server still keeps, for example an AS OF SYSTEM TIME older than the retention age. Start a new transaction, or read as of a newer time.[/]");
                 break;
 
+            // CamusDB runs a WITH clause only without RECURSIVE. A tool or a habit can add RECURSIVE
+            // to a WITH whose CTEs do not read themselves, and then the word is the only problem.
+            case "CADB0533" when ex.Message.Contains("RECURSIVE", StringComparison.OrdinalIgnoreCase):
+                AnsiConsole.MarkupLine("[grey58]When no CTE reads itself, remove[/] [cyan]RECURSIVE[/][grey58]. Otherwise, run the recursion in the application, one level for each statement.[/]");
+                break;
+
             // An inline function or inline trigger body that does not compile, or that uses a
             // refused type or member. Each finding names a line and a column of the body, not of
             // the statement.

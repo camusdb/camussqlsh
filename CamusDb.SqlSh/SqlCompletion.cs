@@ -13,9 +13,10 @@ using RadLine;
 /// <summary>
 /// Provides Tab-completion for the SQL shell. Completion is context-aware: when the
 /// word being typed follows a keyword that expects a table or view name (from, into,
-/// update, join, table, view, describe, truncate, references, or the FOR of SHOW STATISTICS FOR), the cached
-/// list of table, view and materialized-view names is offered instead of the static SQL
-/// vocabulary. Names are
+/// update, join, table, view, describe, truncate, references, the USING of DELETE … USING, or the FOR
+/// of SHOW STATISTICS FOR), the cached list of table, view and materialized-view names is offered
+/// instead of the static SQL vocabulary. The CTE names that the WITH clauses of the statement define
+/// come first in that list. Names are
 /// loaded lazily via "show tables" / "show views" / "show materialized views" and
 /// refreshed whenever the active database changes. Configuration keys are cached the
 /// same way, from "show variables", for the cluster-settings statements, and index names
@@ -158,8 +159,8 @@ internal sealed class SqlCompletion : ITextCompletion
         if (IsDescribeContext(prefix) && _tables.Length + _sequences.Length > 0)
             return [.. _tables, .. _sequences];
 
-        if (IsTableContext(prefix) && _tables.Length > 0)
-            return _tables;
+        if (IsTableContext(prefix) && TableCompletions(prefix) is { Length: > 0 } relations)
+            return relations;
 
         return _staticWords;
     }
@@ -250,6 +251,26 @@ internal sealed class SqlCompletion : ITextCompletion
         return string.Equals(LastToken(prefix), "language", StringComparison.OrdinalIgnoreCase);
     }
 
+    // The relations of the database, with the CTE names that the statement typed so far defines in
+    // its WITH clauses first. A CTE name hides a table of that name, so the table is not offered again.
+    private string[] TableCompletions(string prefix)
+    {
+        string[] ctes = SqlLeadingWith.DefinedNames(CurrentStatement(prefix));
+
+        if (ctes.Length == 0)
+            return _tables;
+
+        return [.. ctes, .. _tables.Where(t => !ctes.Contains(t, StringComparer.OrdinalIgnoreCase))];
+    }
+
+    // The statement that the word being typed is in: the text after the last ';'. The TUI editor holds
+    // several statements, and a CTE of an earlier statement is not visible in a later one.
+    private static string CurrentStatement(string prefix)
+    {
+        int end = prefix.LastIndexOf(';');
+        return end < 0 ? prefix : prefix[(end + 1)..];
+    }
+
     private static bool IsTableContext(string prefix)
     {
         string lastToken = LastToken(prefix);
@@ -258,6 +279,13 @@ internal sealed class SqlCompletion : ITextCompletion
             return false;
 
         if (TableContextKeywords.Contains(lastToken))
+            return true;
+
+        // DELETE FROM <table> [[AS] alias] USING <relations>. USING also names the columns of a join
+        // (JOIN t USING (id)) and the method of an index (USING GIN), so only a DELETE decides. A WITH
+        // clause before the DELETE is skipped.
+        if (string.Equals(lastToken, "using", StringComparison.OrdinalIgnoreCase) &&
+            SqlKind.StartsWithWords(SqlLeadingWith.Skip(CurrentStatement(prefix)), "delete"))
             return true;
 
         // CREATE [UNIQUE | INVERTED] INDEX <name> ON <table> and DROP INDEX <name> ON <table>, each

@@ -11,12 +11,16 @@
 Query OK, 1 rows affected (00:00:00.0123456)
 ```
 
+An `INSERT`, `UPSERT`, `UPDATE` or `DELETE` with a `RETURNING` list shows the returned rows, then the
+`Query OK` line. A statement that starts with a `WITH` clause runs as the statement after the clause.
+Thus `WITH … SELECT` shows rows, and `WITH … UPDATE … RETURNING` shows the returned rows.
+
 Each value shows in the form that you can type back into a statement. For example, `bytes` is an
 `x'…'` literal, and `numeric` has all its digits.
 
 An error shows the exception type, the error code and the message. If the message gives a line
 and a column, the shell shows that line with a `^` under the column. `CADB0516`, `CADB0517` and
-`CADB0519` also show a hint. See [Error Codes](https://camusdb.github.io/docs/error-codes/).
+`CADB0519` also show a hint. `CADB0533` shows a hint for `WITH RECURSIVE`. See [Error Codes](https://camusdb.github.io/docs/error-codes/).
 
 ## Vertical output (`\G`)
 
@@ -75,7 +79,7 @@ camus-cli demo -e "select id, name from users" --format json | jq '.[].name'
 - At the prompt, the shell asks for the name, with the suggestion filled in. `Ctrl+C` clears the
   line, and a second `Ctrl+C` cancels. In a script, the shell uses the suggestion.
 - Quote a name with a space. `~/` is your home directory. An existing file is replaced.
-- The query must return rows (`SELECT`, `SHOW`, `EXPLAIN`).
+- The query must return rows (`SELECT`, `WITH … SELECT`, `SHOW`, `EXPLAIN`).
 - JSON and YAML have the same shape as [`--format`](#json-and-yaml). CSV has a header record. In
   CSV, a null is an empty field, `bytes` is base64, and an array or a `jsonb` value is its JSON
   text.
@@ -113,6 +117,9 @@ produces:
   box.
 - A set operation (`UNION`, `INTERSECT`, `EXCEPT`) shows a `LEFT OPERAND` box and a
   `RIGHT OPERAND` box with the plan of each operand. Nested set operations nest their boxes.
+- A reader of a CTE that the statement computes one time shows `Computed once` with the CTE name.
+  The first reader runs the query of the CTE and keeps its rows. The other readers read the kept
+  rows.
 - With `EXPLAIN (ANALYZE)`, the arrows show measured and estimated rows, and each operator shows
   its storage counters. `Estimate off Nx` marks a difference of 10 times or more.
 
