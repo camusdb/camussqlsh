@@ -186,6 +186,7 @@ if (tuiMode)
         ValueFormatter.Format,
         editor.Highlighter,
         editor.Completion,
+        UserPaths.TuiTabsPath,
         UserPaths.QueryScratchPath);
 
     return;

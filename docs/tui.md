@@ -8,9 +8,10 @@ The screen has three panes:
 
 1. **Data Catalog**, on the left. It lists the databases. A green dot (`●`) marks the current one.
    Expand a database to see its tables, and a table to see its columns.
-2. **Query Editor**, at the top right. It has coloring and completion, as the prompt does.
-3. **Query Results**, at the bottom right. It shows the rows of the last query and one log line
-   for each statement.
+2. **Query Editor**, at the top right. It has coloring and completion, as the prompt does. Its
+   header shows the [tabs](#tabs).
+3. **Query Results**, at the bottom right. It shows the rows of the last query of the active tab,
+   and one log line for each statement.
 
 A status bar shows the time, the row count and errors. A key bar is at the bottom.
 
@@ -27,13 +28,18 @@ with an error. Add `--force-rich` to start it anyway. See
 | `Tab` / `Shift+Tab` | Go to the next or previous pane. |
 | `Ctrl+R`, `F5`, `Shift+Enter` | Run the statement at the cursor. |
 | `Ctrl+G`, `F6` | Run all statements in the editor. |
-| `Esc` | Cancel the running query, or close the help bar. |
+| `Esc` | Cancel the running query, or close the help. |
 | `Ctrl+C` | Cancel the running query. If no query runs, quit. |
-| `F1` | Show or hide the key list. |
+| `F1` | Show the [help](#help) with all the keys. |
 | `F2` | Turn the [row cap](#row-cap-and-paging) on or off. |
 | `F4` | Load the Data Catalog again. |
-| `Ctrl+S` | Save the editor text to the [query file](#query-file). |
-| `Ctrl+L`, `Ctrl+U` | Empty the editor. |
+| `Ctrl+S` | Save the text of all tabs to the [tabs file](#tabs-file). |
+| `Ctrl+L`, `Ctrl+U` | Empty the editor of the active tab. |
+| `Ctrl+T` | Open a new tab after the active tab. |
+| `Ctrl+D` | Close the active tab. |
+| `Ctrl+O`, `F8`, `Ctrl+PageDown` | Go to the next tab. |
+| `F7`, `Ctrl+PageUp` | Go to the previous tab. |
+| `Alt+1` to `Alt+9` | Go to tab 1 to 9. |
 | `Ctrl+Q` | Quit. |
 | `Ctrl+A` / `Ctrl+E` | `Home` / `End`, without `Fn` on a Mac. |
 | `Option+Up` / `Option+Down` | `PageUp` / `PageDown`, without `Fn` on a Mac. |
@@ -44,10 +50,37 @@ with an error. Add `--force-rich` to start it anyway. See
   the key again to roll back and quit.
 - A paste goes into the editor at the cursor, with its tabs and line breaks. This needs bracketed
   paste, which most terminals support.
-- `Shift+Enter` needs the disambiguating keyboard protocol (Ghostty, Kitty, WezTerm, recent
-  iTerm2). Elsewhere it starts a new line. `Ctrl+R` works on all terminals.
+- `Shift+Enter` needs a terminal that supports xterm's `modifyOtherKeys` mode, for example xterm
+  and Ghostty. Elsewhere it starts a new line. `Ctrl+R` works on all terminals. The shell does not
+  turn on the Kitty keyboard protocol, because .NET then reads `F1`, `F2` and `F4` as other keys.
 - `Option+Up` and `Option+Down` need a terminal that sends them as modified arrows (Ghostty,
   Kitty, WezTerm).
+
+## Help
+
+`F1` shows all the keys in a panel at the center of the screen. The panel takes the place of the
+panes while it is open. `F1`, `Esc`, `Enter` or `q` closes it. When the keys do not fit, the arrows,
+`PageUp` and `PageDown` scroll them. Other keys have no effect while the help is open, except
+`Ctrl+C` and `Ctrl+Q`. A paste closes the help and goes into the editor.
+
+## Tabs
+
+Each tab has its own editor text, result grid, status line and messages. The header of the editor
+shows the tabs: a number and the first line of text. The active tab has a yellow background. A dot
+(`●`) marks the tab where a statement runs.
+
+- All tabs use one connection. Thus `use`, the current database and an open transaction apply to
+  all tabs. A `BEGIN` in one tab and a `COMMIT` in another tab end the same transaction.
+- One statement runs at a time. You can change tabs while it runs. Its rows go to the tab where it
+  started. In another tab, the key bar shows `RUNNING IN TAB n`. `Esc` cancels the run from any tab.
+- There can be at most 9 tabs.
+- `Ctrl+D` on a tab with text asks first, because the text is lost. Press `Ctrl+D` again to close
+  it. A tab where a statement runs does not close. When you close the last tab, an empty tab
+  replaces it.
+- `Ctrl+PageUp` and `Ctrl+PageDown` work only in terminals that send them. `Alt+1` to `Alt+9` need a
+  terminal that sends Option or Alt as `Esc`. `Ctrl+O`, `F7` and `F8` work in all terminals.
+- When the tabs do not fit in the header, it shows the tabs near the active tab, with `‹` and `›`
+  for the other tabs.
 
 ## Data Catalog
 
@@ -115,7 +148,11 @@ failed run opens the messages view. A run with rows opens the grid.
 The grid reads 200 rows at a time, as you scroll. A cap of 500 rows is on at start. `F2` turns
 it off, so you can page through the full result. The cap does not add a `LIMIT` to the statement.
 
-## Query file
+## Tabs file
 
-The editor text is in `query.sql`, next to the [history file](interactive-shell.md#history). It
-loads at start and saves at exit and on `Ctrl+S`.
+The text of all tabs and the active tab are in `tui-tabs.json`, next to the
+[history file](interactive-shell.md#history). The file loads at start, and it saves at exit and on
+`Ctrl+S`. The results of a tab are not saved.
+
+Earlier versions kept one editor in `query.sql`. When `tui-tabs.json` does not exist, the text of
+`query.sql` becomes the first tab. The shell does not change or delete `query.sql`.

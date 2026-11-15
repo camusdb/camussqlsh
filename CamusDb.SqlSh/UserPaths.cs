@@ -6,7 +6,7 @@
  */
 
 /// <summary>
-/// Locations of the per-user files the shell keeps (statement history, the TUI's query scratch
+/// Locations of the per-user files the shell keeps (statement history, the TUI's tabs and its old query scratch
 /// file). Everything lives under the user's own profile — never the shared temporary directory,
 /// where a fixed, predictable name lets any other local user pre-create or symlink the file and
 /// then read whatever the shell writes or clobber an arbitrary file with it.
@@ -39,6 +39,9 @@ internal static class UserPaths
     // A fixed name is fine inside a directory only this user can reach, and it is what lets the
     // TUI restore the previous session's query buffer.
     internal static string QueryScratchPath => Path.Combine(StateDirectory(), "query.sql");
+
+    // The text of every TUI tab. It takes the place of query.sql, which a first start with tabs reads.
+    internal static string TuiTabsPath => Path.Combine(StateDirectory(), "tui-tabs.json");
 
     /// <summary>
     /// Creates the state directory with owner-only permissions (0700) on Unix, so the files
