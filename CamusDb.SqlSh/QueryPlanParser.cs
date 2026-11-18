@@ -27,14 +27,24 @@ internal enum PlanNodeKind
 /// <summary>
 /// A query plan read back from the rows of an EXPLAIN result set.
 ///
-/// <para>The server walks a plan that is one chain: every operator has a single input, and it
-/// emits the chain root first. A join is a link in that chain whose left input is the next row;
-/// its right input never gets a row of its own, so the join's detail text is the only place that
-/// names it (see <see cref="QueryPlanNode.SideInput"/>).</para>
+/// <para>The server emits the plan tree root first, in a depth-first walk, and gives the level of
+/// each row in the <c>depth</c> column. Most operators have a single input, so the plan is mostly
+/// one chain. A join is a link in that chain whose left input is the next row. Its right input
+/// usually has no row of its own, so the join's detail text is the only place that names it (see
+/// <see cref="QueryPlanNode.SideInput"/>).</para>
 ///
-/// <para>A set operation (UNION, INTERSECT, EXCEPT) is the one place where the plan branches. It is
-/// the source of its chain, and each of its two operands is a chain of its own under an
-/// <c>operand</c> row (see <see cref="QueryPlanNode.Branches"/>).</para>
+/// <para>The plan branches in three places (see <see cref="QueryPlanNode.Branches"/>):</para>
+/// <list type="bullet">
+/// <item>A set operation (UNION, INTERSECT, EXCEPT, and the UNION of a recursive CTE) is the source
+/// of its chain. Each of its two operands is a chain of its own under an <c>operand</c> row.</item>
+/// <item>A derived table, a CTE or a view shows the plan of its own query under its
+/// <c>derived-table-scan</c> row.</item>
+/// <item>A join whose right input is a derived table has a <c>derived-table-scan</c> row for that
+/// input, before the rows of its left input. Both inputs then have rows.</item>
+/// </list>
+///
+/// <para>A server from before the <c>depth</c> column sends only the first kind of branch. The parser
+/// reads such rows by their order (see <see cref="QueryPlanParser"/>).</para>
 /// </summary>
 internal sealed class QueryPlan
 {
@@ -73,8 +83,11 @@ internal sealed class QueryPlanNode
 
     public PlanNodeKind Kind { get; init; }
 
-    /// <summary>The table, index or alias this operator works on, when the detail names one.</summary>
+    /// <summary>The table, index, alias or CTE this operator works on, when the detail names one.</summary>
     public string? Target { get; init; }
+
+    /// <summary>The level of the row in the plan tree: 0 for the root. Null from a server that does not send it.</summary>
+    public int? Depth { get; init; }
 
     /// <summary>
     /// The CTE (common table expression) that this reader reads, when the statement computes that CTE
@@ -86,12 +99,13 @@ internal sealed class QueryPlanNode
 
     /// <summary>
     /// The name of a join's second input, which has no row of its own in the plan: <c>Right input</c>,
-    /// or <c>Subquery</c> for a semi-join or an anti-join. Null for an operator that is not a join.
+    /// or <c>Subquery</c> for a semi-join or an anti-join. Null for an operator that is not a join, and
+    /// for a join whose second input has rows, which a branch then shows.
     /// </summary>
-    public string? SideInput { get; init; }
+    public string? SideInput { get; set; }
 
     /// <summary>What the detail text tells about the second input, such as its alias or its index.</summary>
-    public string? SideDetail { get; init; }
+    public string? SideDetail { get; set; }
 
     public long? EstimatedRows { get; init; }
 
@@ -114,21 +128,20 @@ internal sealed class QueryPlanNode
     /// </summary>
     public List<QueryPlanSpan> Spans { get; } = [];
 
-    /// <summary>The left and the right operand of a set operation. Empty for any other operator.</summary>
+    /// <summary>
+    /// The chains that feed this operator besides its input: the two operands of a set operation, the
+    /// query of a derived table, or the two inputs of a join whose right input has rows. An operator
+    /// with branches is where its chain starts. Empty for any other operator.
+    /// </summary>
     public List<QueryPlanBranch> Branches { get; } = [];
 }
 
 /// <summary>
-/// One operand of a set operation: the <c>operand</c> row, which under EXPLAIN (ANALYZE) counts the
-/// rows the operand returned, and the operand's own chain in data-flow order.
+/// One chain that feeds an operator, in data-flow order, with the label that the flow puts on its box.
+/// <paramref name="Operand"/> is the <c>operand</c> row of a set-operation operand, which under
+/// EXPLAIN (ANALYZE) counts the rows that the operand returned. It is null for any other branch.
 /// </summary>
-internal sealed record QueryPlanBranch(QueryPlanNode Operand, IReadOnlyList<QueryPlanNode> Nodes)
-{
-    /// <summary><c>left</c> or <c>right</c>, as the detail of the operand row gives it.</summary>
-    public string Side => SideOf(Operand);
-
-    internal static string SideOf(QueryPlanNode operand) => operand.Detail.Split(',')[0].Trim();
-}
+internal sealed record QueryPlanBranch(string Label, QueryPlanNode? Operand, IReadOnlyList<QueryPlanNode> Nodes);
 
 internal sealed record QueryPlanSpan(string Detail, long? ActualRows, long? RowsRead);
 
@@ -143,6 +156,11 @@ internal sealed record QueryPlanNote(string Name, string Detail);
 /// come rows that describe the whole plan (<c>plan-info</c>, <c>distribution</c>, <c>cache</c>), and
 /// ANALYZE puts span rows after a gather or a broadcast join. The parser keeps those apart, because
 /// they are not steps of the flow.</para>
+///
+/// <para>When each operator row has a <c>depth</c>, the parser builds the tree from it. The row order
+/// alone does not show where the subtree of a first child ends, for example the query under the
+/// right input of a join. A server from before the column sends a plan that branches only at a set
+/// operation, so the parser then reads the rows by their order.</para>
 ///
 /// <para>The web console has the same parser over its own row type. Keep the two in step when the
 /// server's EXPLAIN shape changes.</para>
@@ -168,6 +186,7 @@ internal static class QueryPlanParser
     private static readonly Regex InnerKey = DetailKey("inner");
     private static readonly Regex RightOrderKey = DetailKey("right-order");
     private static readonly Regex ComputedOnceKey = DetailKey("computed_once");
+    private static readonly Regex CteKey = DetailKey("cte");
 
     /// <summary>
     /// Returns the plan, or null when the columns are not the EXPLAIN shape or no operator row came
@@ -227,16 +246,21 @@ internal static class QueryPlanParser
 
         List<QueryPlanNode> flow;
 
-        if (nodes.Any(n => n.Kind == PlanNodeKind.SetOperation))
+        if (BuildTree(nodes) is { } root)
+        {
+            flow = ReadTreeChain(root);
+        }
+        else if (nodes.Any(n => n.Kind == PlanNodeKind.SetOperation))
         {
             int position = 0;
             flow = ReadChain(nodes, ref position, branch: false);
         }
         else
         {
-            // A plan comes root first, so the source is the last row. The FROM-less shape is the one
-            // exception: it lists constant-source, then project, then limit. The source is the only
-            // node with no input, so whichever end holds it is where the flow starts.
+            // A plan comes root first, so the source is the last row. A server from before the depth
+            // column lists the FROM-less shape the other way: constant-source, then project, then
+            // limit. The source is the only node with no input, so whichever end holds it is where
+            // the flow starts.
             flow = nodes;
             if (!(flow[0].Kind == PlanNodeKind.Source && flow[^1].Kind != PlanNodeKind.Source))
                 flow.Reverse();
@@ -249,14 +273,164 @@ internal static class QueryPlanParser
             Nodes = flow,
             Notes = notes,
             TotalEstimatedCost = QueryPlan.Flatten(flow).Sum(n => n.EstimatedCost ?? 0),
-            TotalTimeMs = flow.Select(n => n.ActualTimeMs).FirstOrDefault(t => t is not null),
+            // The root has the time of the whole plan. A derived table whose query the plan shows has
+            // the time of that query, so the root comes first.
+            TotalTimeMs = flow[^1].ActualTimeMs ?? flow.Select(n => n.ActualTimeMs).FirstOrDefault(t => t is not null),
         };
     }
 
+    /// <summary>One operator row and the rows one level below it, in the order the server sent them.</summary>
+    private sealed class PlanRow(QueryPlanNode node)
+    {
+        public QueryPlanNode Node { get; } = node;
+
+        public List<PlanRow> Children { get; } = [];
+    }
+
     /// <summary>
-    /// Reads one chain from the rows, which come root first in a depth-first walk, and returns it in
-    /// data-flow order. A set operation is followed by its <c>operand(left)</c> row and the left
-    /// chain, then by its <c>operand(right)</c> row and the right chain.
+    /// Builds the plan tree from the <c>depth</c> column. Returns null when a row has no depth, or when
+    /// the depths do not make one tree: a second root, or a row more than one level below the row
+    /// before it. The caller then reads the rows by their order.
+    /// </summary>
+    private static PlanRow? BuildTree(List<QueryPlanNode> nodes)
+    {
+        if (nodes.Any(n => n.Depth is null) || nodes[0].Depth != 0)
+            return null;
+
+        PlanRow root = new(nodes[0]);
+
+        // path[d] is the last row at depth d, so path[d - 1] is the parent of a row at depth d.
+        List<PlanRow> path = [root];
+
+        for (int i = 1; i < nodes.Count; i++)
+        {
+            int depth = nodes[i].Depth!.Value;
+            if (depth < 1 || depth > path.Count)
+                return null;
+
+            PlanRow row = new(nodes[i]);
+            path[depth - 1].Children.Add(row);
+            path.RemoveRange(depth, path.Count - depth);
+            path.Add(row);
+        }
+
+        return root;
+    }
+
+    /// <summary>
+    /// Reads the chain that ends at <paramref name="top"/>, and returns it in data-flow order. Each
+    /// operator's input is the next link. The chain starts at an operator with no input, or at one
+    /// whose children become branches.
+    /// </summary>
+    private static List<QueryPlanNode> ReadTreeChain(PlanRow top)
+    {
+        List<QueryPlanNode> chain = [];
+
+        for (PlanRow? row = top; row is not null; row = Expand(row))
+            chain.Add(row.Node);
+
+        chain.Reverse();
+        return chain;
+    }
+
+    /// <summary>
+    /// Adds the branches of the operator in <paramref name="row"/>, and returns the row of its input.
+    /// Returns null when the chain starts at this operator.
+    ///
+    /// <para>The server walks the extra children of a node before its input. A join shows its right
+    /// input that way, so the input of an operator is its last child. A source has no input: each of
+    /// its children is the root of the query it reads. A set operation has its operand rows.</para>
+    /// </summary>
+    private static PlanRow? Expand(PlanRow row)
+    {
+        QueryPlanNode node = row.Node;
+        List<PlanRow> children = row.Children;
+
+        if (children.Count == 0)
+            return null;
+
+        if (node.Kind == PlanNodeKind.SetOperation)
+        {
+            foreach (PlanRow child in children)
+                node.Branches.Add(IsOperand(child.Node)
+                    ? new QueryPlanBranch(OperandLabel(node, child.Node), child.Node, ReadOperandChain(child))
+                    : new QueryPlanBranch(QueryLabel(node), null, ReadTreeChain(child)));
+
+            return null;
+        }
+
+        if (node.Kind == PlanNodeKind.Source)
+        {
+            foreach (PlanRow child in children)
+                node.Branches.Add(new QueryPlanBranch(QueryLabel(node), null, ReadTreeChain(child)));
+
+            return null;
+        }
+
+        if (children.Count == 1)
+            return children[0];
+
+        // Two inputs that both have rows. The left input is not a link of the chain above any more,
+        // so each input gets a box, as the operands of a set operation do.
+        bool join = node.Kind == PlanNodeKind.Join;
+
+        node.Branches.Add(new QueryPlanBranch(join ? "LEFT INPUT" : "INPUT", null, ReadTreeChain(children[^1])));
+        foreach (PlanRow extra in children.Take(children.Count - 1))
+            node.Branches.Add(new QueryPlanBranch(join ? "RIGHT INPUT" : "SIDE INPUT", null, ReadTreeChain(extra)));
+
+        // The RIGHT INPUT box shows what the side box of the join would name.
+        if (join)
+        {
+            node.SideInput = null;
+            node.SideDetail = null;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The chain of one set-operation operand. The operand row has one child, the root of the operand's
+    /// plan. A shape with more children keeps the operand row as a step, so no operator is lost.
+    /// </summary>
+    private static List<QueryPlanNode> ReadOperandChain(PlanRow operand) => operand.Children.Count switch
+    {
+        0 => [],
+        1 => ReadTreeChain(operand.Children[0]),
+        _ => ReadTreeChain(operand),
+    };
+
+    /// <summary>
+    /// The label of an operand box. The UNION of a recursive CTE has a non-recursive term on the left
+    /// and a recursive term on the right.
+    /// </summary>
+    private static string OperandLabel(QueryPlanNode setOperation, QueryPlanNode operand)
+    {
+        string side = OperandSide(operand);
+
+        if (string.Equals(setOperation.Operator, "recursive-union", StringComparison.OrdinalIgnoreCase))
+            return side switch
+            {
+                "left" => "NON-RECURSIVE TERM",
+                "right" => "RECURSIVE TERM",
+                _ => "TERM",
+            };
+
+        return side.Length == 0 ? "OPERAND" : $"{side.ToUpperInvariant()} OPERAND";
+    }
+
+    /// <summary>The label of the box that holds the query a source reads, with the source's alias when it has one.</summary>
+    private static string QueryLabel(QueryPlanNode source) =>
+        source.Target is { } target ? $"QUERY OF {target}" : "QUERY";
+
+    /// <summary><c>left</c> or <c>right</c>, as the detail of an operand row gives it.</summary>
+    private static string OperandSide(QueryPlanNode operand) =>
+        operand.Detail.Split(',')[0].Trim().ToLowerInvariant();
+
+    /// <summary>
+    /// Reads one chain from the rows of a server without the <c>depth</c> column. The rows come root
+    /// first in a depth-first walk, and the chain comes back in data-flow order. A set operation is
+    /// followed by its <c>operand(left)</c> row and the left chain, then by its <c>operand(right)</c>
+    /// row and the right chain.
     ///
     /// <para>The chain of an operand ends at its source, or at a nested set operation once both of
     /// its operands are read. The main chain reads every row that is left, so a shape the parser
@@ -302,11 +476,12 @@ internal static class QueryPlanParser
             return;
 
         QueryPlanNode operand = rows[position];
-        if (!string.Equals(QueryPlanBranch.SideOf(operand), side, StringComparison.OrdinalIgnoreCase))
+        if (OperandSide(operand) != side)
             return;
 
         position++;
-        setOperation.Branches.Add(new QueryPlanBranch(operand, ReadChain(rows, ref position, branch: true)));
+        setOperation.Branches.Add(new QueryPlanBranch(OperandLabel(setOperation, operand), operand,
+            ReadChain(rows, ref position, branch: true)));
     }
 
     private static bool IsOperand(QueryPlanNode node) =>
@@ -322,7 +497,8 @@ internal static class QueryPlanParser
             Operator = name,
             Detail = detail,
             Kind = kind,
-            Target = kind == PlanNodeKind.Source ? DescribeTarget(name, detail) : null,
+            Target = DescribeTarget(name, detail),
+            Depth = Long(row, columns, "depth") is long depth and >= 0 and <= int.MaxValue ? (int)depth : null,
             ComputedOnce = Value(ComputedOnceKey, detail),
             SideInput = side,
             SideDetail = sideDetail,
@@ -340,8 +516,11 @@ internal static class QueryPlanParser
     {
         // A window node is the derived table of a windowed SELECT: the server prints it with no
         // input rows of its own, so it is where its chain starts.
+        // A values node is a VALUES list in FROM. A work-table-scan is the reference to a recursive CTE
+        // in its own recursive term: it reads the rows of the step before.
         "table-scan" or "index-lookup" or "index-range-scan" or "index-in-list" or "gin-scan"
-            or "derived-table-scan" or "window" or "function-scan" or "constant-source" => PlanNodeKind.Source,
+            or "derived-table-scan" or "window" or "function-scan" or "constant-source"
+            or "values" or "work-table-scan" => PlanNodeKind.Source,
         "nested-loop-join" or "index-nested-loop-join" or "hash-join" or "merge-join"
             or "semi-join" or "anti-join" or "null-aware-anti-join" => PlanNodeKind.Join,
         "filter" or "having-filter" => PlanNodeKind.Filter,
@@ -350,7 +529,7 @@ internal static class QueryPlanParser
         "limit" => PlanNodeKind.Limit,
         "project" => PlanNodeKind.Project,
         "gather" => PlanNodeKind.Exchange,
-        "union" or "intersect" or "except" => PlanNodeKind.SetOperation,
+        "union" or "intersect" or "except" or "recursive-union" => PlanNodeKind.SetOperation,
         _ => PlanNodeKind.Other,
     };
 
@@ -358,7 +537,8 @@ internal static class QueryPlanParser
     {
         "table-scan" => Value(TableKey, detail),
         "index-lookup" or "index-range-scan" or "index-in-list" or "gin-scan" => Value(IndexKey, detail),
-        "derived-table-scan" => Value(AliasKey, detail),
+        "derived-table-scan" or "values" => Value(AliasKey, detail),
+        "work-table-scan" or "recursive-union" => Value(CteKey, detail),
         "function-scan" => FunctionName(detail),
         _ => null,
     };

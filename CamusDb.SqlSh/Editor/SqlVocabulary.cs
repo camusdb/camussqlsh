@@ -143,6 +143,10 @@ internal static class SqlVocabulary
         "right",
         "outer",
         "cross",
+        // CROSS JOIN LATERAL (<query>) alias, JOIN LATERAL … ON and a comma list: the derived table runs
+        // once for each left row and can read the columns of the items before it. LATERAL is a reserved
+        // word to the parser. A table function that names a column is lateral without the word.
+        "lateral",
         "offset",
         "unique",
         "having",
@@ -176,6 +180,9 @@ internal static class SqlVocabulary
         "union",
         "intersect",
         "except",
+        // WITH RECURSIVE name [(columns)] AS (<non-recursive term> UNION [ALL] <recursive term>): under
+        // RECURSIVE, each CTE of the list can read each CTE of the list, itself included.
+        "recursive",
         // Quantified comparisons: <expr> <op> ANY|SOME|ALL (<subquery>). ANY and SOME are plain
         // identifiers to the parser and stay usable as names. ALL is listed below for GRANT.
         "any",
@@ -572,6 +579,10 @@ internal static class SqlVocabulary
         "ifnull",
         "nvl",
         "nullif",
+        // GREATEST(a, b, …) and LEAST(a, b, …), with the PostgreSQL rules: a NULL argument is left out,
+        // and the result is NULL only when every argument is NULL.
+        "greatest",
+        "least",
         "to_string",
         "to_int64",
         "to_float64",

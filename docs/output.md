@@ -19,8 +19,11 @@ Each value shows in the form that you can type back into a statement. For exampl
 `x'…'` literal, and `numeric` has all its digits.
 
 An error shows the exception type, the error code and the message. If the message gives a line
-and a column, the shell shows that line with a `^` under the column. `CADB0516`, `CADB0517` and
-`CADB0519` also show a hint. `CADB0533` shows a hint for `WITH RECURSIVE`. See [Error Codes](https://camusdb.github.io/docs/error-codes/).
+and a column, the shell shows that line with a `^` under the column. `CADB0516`, `CADB0517`,
+`CADB0519` and `CADB0847` also show a hint. `CADB0533` shows a hint when the server refuses a part
+of a recursive CTE (`WITH RECURSIVE`). `CADB0560` (a recursive CTE went past its limit) and
+`CADB0561` (a function in `FROM` made too many rows) show the `SET CLUSTER SETTING` statement that
+raises the limit. See [Error Codes](https://camusdb.github.io/docs/error-codes/).
 
 ## Vertical output (`\G`)
 
@@ -116,12 +119,21 @@ produces:
 - A dashed box shows the second input of a join. On a narrow terminal, it is a line in the join
   box.
 - A set operation (`UNION`, `INTERSECT`, `EXCEPT`) shows a `LEFT OPERAND` box and a
-  `RIGHT OPERAND` box with the plan of each operand. Nested set operations nest their boxes.
+  `RIGHT OPERAND` box with the plan of each operand. The `recursive-union` of a recursive CTE
+  shows a `NON-RECURSIVE TERM` box and a `RECURSIVE TERM` box.
+- A derived table, a CTE or a view shows a `QUERY OF <alias>` box above its
+  `derived-table-scan`, with the plan of its query.
+- A join whose right input is a derived table shows a `LEFT INPUT` box and a `RIGHT INPUT` box.
+- Boxes in a box show a branch of a branch, for example a CTE that reads another CTE.
+- The `QUERY OF` and `INPUT` boxes need a server that sends the `depth` column of `EXPLAIN`. With
+  an older server, the shell reads the plan rows in their order, and only a set operation gets
+  boxes.
 - A reader of a CTE that the statement computes one time shows `Computed once` with the CTE name.
   The first reader runs the query of the CTE and keeps its rows. The other readers read the kept
   rows.
 - With `EXPLAIN (ANALYZE)`, the arrows show measured and estimated rows, and each operator shows
-  its storage counters. `Estimate off Nx` marks a difference of 10 times or more.
+  its storage counters. `Estimate off Nx` marks a difference of 10 times or more. A derived table
+  with a `QUERY OF` box also shows the time of its query.
 
 `\plan table` shows the plan rows as a table. `\plan flow` shows the flow again. `\plan` alone
 shows the setting, which stays until exit. `\G`, `--format json|yaml` and `--tui` always show the

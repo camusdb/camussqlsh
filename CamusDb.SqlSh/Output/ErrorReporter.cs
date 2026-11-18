@@ -43,10 +43,16 @@ internal static class ErrorReporter
                 AnsiConsole.MarkupLine("[grey58]The snapshot of this read is older than the history the server still keeps, for example an AS OF SYSTEM TIME older than the retention age. Start a new transaction, or read as of a newer time.[/]");
                 break;
 
-            // CamusDB runs a WITH clause only without RECURSIVE. A tool or a habit can add RECURSIVE
-            // to a WITH whose CTEs do not read themselves, and then the word is the only problem.
-            case "CADB0533" when ex.Message.Contains("RECURSIVE", StringComparison.OrdinalIgnoreCase):
-                AnsiConsole.MarkupLine("[grey58]When no CTE reads itself, remove[/] [cyan]RECURSIVE[/][grey58]. Otherwise, run the recursion in the application, one level for each statement.[/]");
+            // CADB0533 is the code of each feature that the server refuses. Some of its messages are
+            // about recursive CTEs, and each of those has its own fix.
+            case "CADB0533":
+                WriteRecursionHint(ex.Message);
+                break;
+
+            // A recursive CTE, or a function in FROM, went past a cluster setting. The message names
+            // the setting and the usual fixes, so the hint gives the statement that raises it.
+            case "CADB0560" or "CADB0561":
+                WriteRaiseSettingHint(ex.Message);
                 break;
 
             // An inline function or inline trigger body that does not compile, or that uses a
@@ -58,6 +64,38 @@ internal static class ErrorReporter
         }
 
         AnsiConsole.WriteLine();
+    }
+
+    // The fixes for the CADB0533 messages about recursive CTEs. Another CADB0533 message gets no hint.
+    private static void WriteRecursionHint(string message)
+    {
+        // A server older than recursive CTEs refuses the word RECURSIVE itself.
+        if (message.Contains("WITH RECURSIVE is not supported", StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine("[grey58]This server does not run recursive CTEs. Upgrade the server. When no CTE reads itself, you can also remove[/] [cyan]RECURSIVE[/][grey58].[/]");
+        }
+        // ORDER BY, LIMIT or OFFSET on the UNION of a recursive CTE, which PostgreSQL also refuses.
+        else if (message.Contains("in a recursive query is not supported", StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine("[grey58]Put the ORDER BY, LIMIT or OFFSET on the query that reads the CTE, not on the UNION in the CTE. When that query reads the CTE one time, its LIMIT also stops a recursion with no end.[/]");
+        }
+        else if (message.Contains("Mutual recursion", StringComparison.OrdinalIgnoreCase))
+        {
+            AnsiConsole.MarkupLine("[grey58]A CTE can read itself, but two CTEs cannot read each other. Write the two as one recursive CTE, with a column that tells their rows apart.[/]");
+        }
+    }
+
+    // The setting in the message, as in "... made more than 5000000 rows (max_table_function_rows)."
+    private static readonly Regex LimitSetting = new(@"\((?<name>max_[a-z_]+)\)", RegexOptions.CultureInvariant);
+
+    private static void WriteRaiseSettingHint(string message)
+    {
+        Match match = LimitSetting.Match(message);
+        if (!match.Success)
+            return;
+
+        string name = Markup.Escape(match.Groups["name"].Value);
+        AnsiConsole.MarkupLine($"[grey58]To raise the limit for the cluster, run[/] [cyan]SET CLUSTER SETTING {name} = <value>[/][grey58]. The next statement uses the new value, and a value of 0 turns the limit off.[/]");
     }
 
     // Startup connection failures are the one place where a raw stack trace helps nobody: the causes

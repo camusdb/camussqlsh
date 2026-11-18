@@ -20,6 +20,6 @@ public sealed class MyLineNumberPrompt : ILineEditorPrompt
 
     public (Markup Markup, int Margin) GetPrompt(ILineEditorState state, int line)
     {
-        return (new Markup(line == 0 ? "camus> " : "   -> ", _style), 1);
+        return (new Markup(line == 0 ? "camus> " : "    -> ", _style), 1);
     }
 }

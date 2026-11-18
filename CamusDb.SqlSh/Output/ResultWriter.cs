@@ -8,6 +8,7 @@
 
 using CamusDB.Client;
 using Spectre.Console;
+using Spectre.Console.Rendering;
 
 // Writes what a statement returns: its rows as a table, as vertical blocks for \G, as one JSON or YAML
 // document for --format, or the plan of an EXPLAIN as a flow.
@@ -113,20 +114,27 @@ internal sealed class ResultWriter
         // Column names come from the server, so they're data like everything else it sends:
         // escaped the same way, since a name with '[' or Spectre markup in it (possible from
         // a backtick-quoted identifier) would otherwise render as markup or throw mid-run.
+        //
+        // The column has no padding: BandedCell draws it, so the band of a row reaches both borders.
         foreach (KeyValuePair<string, ColumnValue> item in first)
-            table.AddColumn(Markup.Escape(item.Key));
+            table.AddColumn(new TableColumn(new BandedCell(Markup.Escape(item.Key), null)).PadLeft(0).PadRight(0));
 
         return table;
     }
 
+    // Every second row gets a faint background, so the eye can follow a row across a wide table.
+    private static readonly Style ZebraBand = new(background: Color.Grey15);
+
     private static void AddResultRow(Table table, Dictionary<string, ColumnValue> current)
     {
-        string[] row = new string[current.Count];
+        IRenderable[] row = new IRenderable[current.Count];
+
+        Style? band = table.Rows.Count % 2 == 1 ? ZebraBand : default(Style?);
 
         int i = 0;
 
         foreach (KeyValuePair<string, ColumnValue> item in current)
-            row[i++] = ValueFormatter.Format(item.Value);
+            row[i++] = new BandedCell(ValueFormatter.Format(item.Value), band);
 
         table.AddRow(row);
     }

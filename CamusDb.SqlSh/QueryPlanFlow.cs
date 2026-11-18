@@ -17,8 +17,10 @@ using System.Globalization;
 /// colour of its family. A join's second input has no row in the plan, so it is a dashed box beside
 /// the join, or a line in the join's panel when the terminal is too narrow for the box.</para>
 ///
-/// <para>A set operation has two inputs that both have rows. Each operand is a box above the set
-/// operation, with the operand's own flow inside it, so a nested set operation nests its boxes.</para>
+/// <para>A branch of the plan is a box above the operator that it feeds, with its own flow inside
+/// it, so nested branches nest their boxes. A set operation has a box for each operand. A derived
+/// table, a CTE or a view has a box for the query it reads. A join whose right input has rows has
+/// a box for each input.</para>
 /// </summary>
 internal static class QueryPlanFlow
 {
@@ -122,11 +124,12 @@ internal static class QueryPlanFlow
     }
 
     /// <summary>
-    /// One operand of a set operation: a box with the operand's flow inside it. The last edge in the
-    /// box carries the rows the operand returns. The operand row counts them under ANALYZE; plain
-    /// EXPLAIN gives the operand no count, so the estimate of the operand's last operator stands.
+    /// One branch of the plan: a box with the branch's own flow inside it. The last edge in the box
+    /// carries the rows that the branch returns. For a set-operation operand, the operand row counts
+    /// them under ANALYZE. Plain EXPLAIN gives the operand no count, and other branches have no
+    /// operand row, so the count of the branch's last operator stands.
     /// </summary>
-    private static Panel BranchPanel(QueryPlan plan, QueryPlanNode setOperation, QueryPlanBranch branch, int width,
+    private static Panel BranchPanel(QueryPlan plan, QueryPlanNode owner, QueryPlanBranch branch, int width,
         QueryPlanNode? hottest, Glyphs glyphs)
     {
         // The box takes two columns for its borders and two for its padding.
@@ -137,19 +140,17 @@ internal static class QueryPlanFlow
         {
             QueryPlanNode last = branch.Nodes[^1];
             int center = Chain(lines, plan, branch.Nodes, inner, hottest, glyphs) / 2;
-            lines.AddRange(Edge(branch.Operand.ActualRows ?? last.ActualRows,
-                branch.Operand.EstimatedRows ?? last.EstimatedRows, center, glyphs));
+            lines.AddRange(Edge(branch.Operand?.ActualRows ?? last.ActualRows,
+                branch.Operand?.EstimatedRows ?? last.EstimatedRows, center, glyphs));
         }
         else
         {
-            lines.Add(new Markup("[grey]The plan shows no operator for this operand.[/]"));
+            lines.Add(new Markup("[grey]The plan shows no operator here.[/]"));
         }
-
-        string side = branch.Side.Length == 0 ? "OPERAND" : $"{branch.Side.ToUpperInvariant()} OPERAND";
 
         return new Panel(new Rows(lines))
         {
-            Header = new PanelHeader($"[{KindColor(setOperation.Kind)} bold] {Markup.Escape(side)} [/]"),
+            Header = new PanelHeader($"[{KindColor(owner.Kind)} bold] {Markup.Escape(branch.Label)} [/]"),
             Border = BoxBorder.Rounded,
             BorderStyle = Style.Parse(EdgeColor),
             Padding = new Padding(1, 0, 1, 0),
@@ -218,7 +219,11 @@ internal static class QueryPlanFlow
 
         double? share = CostShare(plan, node);
 
-        if (Metrics(node, share) is string metrics)
+        // The summary line has the time of the root, so only the other operators show their own time:
+        // under ANALYZE, a derived table whose query the plan shows has the time of that query.
+        bool showTime = !ReferenceEquals(node, plan.Nodes[^1]);
+
+        if (Metrics(node, share, showTime) is string metrics)
             content.Add(new Markup(metrics));
 
         // The panel takes two columns for its borders and two for its padding.
@@ -318,12 +323,15 @@ internal static class QueryPlanFlow
                $"[grey35]{string.Concat(Enumerable.Repeat(glyphs.BarEmpty, width - filled))}[/]";
     }
 
-    private static string? Metrics(QueryPlanNode node, double? share)
+    private static string? Metrics(QueryPlanNode node, double? share, bool showTime)
     {
         List<string> parts = [];
 
         if (share is double s)
             parts.Add($"[grey]est. cost[/] [bold]{FormatCost(node.EstimatedCost!.Value)}[/] [grey]({FormatShare(s)})[/]");
+
+        if (showTime && node.ActualTimeMs is double ms)
+            parts.Add($"[grey]time[/] [bold]{FormatMs(ms)}[/]");
 
         if (Counter(node, node.RowsRead) is long read)
             parts.Add($"[grey]rows read[/] [bold]{FormatCount(read)}[/]");
@@ -339,10 +347,15 @@ internal static class QueryPlanFlow
 
     /// <summary>
     /// ANALYZE reports the storage counters on every operator, and they are 0 on each one that
-    /// does not touch storage. A zero is news on a source only, so the other operators leave it out.
+    /// does not touch storage. A zero is news only on a source that reads storage, so the other
+    /// operators leave it out. A derived table, for example, reads nothing itself: the query under
+    /// it counts the reads.
     /// </summary>
     private static long? Counter(QueryPlanNode node, long? value) =>
-        value is long v && (v > 0 || node.Kind == PlanNodeKind.Source) ? v : null;
+        value is long v && (v > 0 || ReadsStorage(node)) ? v : null;
+
+    private static bool ReadsStorage(QueryPlanNode node) => node.Operator.ToLowerInvariant()
+        is "table-scan" or "index-lookup" or "index-range-scan" or "index-in-list" or "gin-scan";
 
     /// <summary>
     /// A label when the measured rows are ten times the estimate or a tenth of it. Small counts are
@@ -416,6 +429,8 @@ internal static class QueryPlanFlow
         "window" => "Sorts the rows once for each PARTITION BY and ORDER BY, and computes the window functions.",
         "function-scan" => "Makes rows with a function in FROM, without reading a table.",
         "constant-source" => "Makes one row without reading a table.",
+        "values" => "Makes the rows of a VALUES list, without reading a table.",
+        "work-table-scan" => "Reads the rows that the step before of the recursive CTE made.",
         "filter" => "Keeps only the rows that match the condition.",
         "having-filter" => "Keeps only the groups that match HAVING.",
         "aggregate" => "Groups the rows and computes the aggregates.",
@@ -435,6 +450,7 @@ internal static class QueryPlanFlow
         "union" => "Returns the rows of both operands. Without ALL, it removes duplicate rows.",
         "intersect" => "Returns the rows that are in both operands.",
         "except" => "Returns the rows of the left operand that are not in the right operand.",
+        "recursive-union" => "Runs the non-recursive term once, then the recursive term again on the rows of each step, until a step makes no rows. Without ALL, it removes duplicate rows.",
         "lock_rows" => "Locks each row before it passes the row on (FOR UPDATE).",
         _ => null,
     };
