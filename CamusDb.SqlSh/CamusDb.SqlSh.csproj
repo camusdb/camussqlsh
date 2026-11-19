@@ -40,4 +40,8 @@
     <ProjectReference Include="..\Radline\RadLine\RadLine.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="CamusDb.SqlSh.Tests" />
+  </ItemGroup>
+
 </Project>

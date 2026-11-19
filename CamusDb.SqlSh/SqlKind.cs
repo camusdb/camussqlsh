@@ -80,12 +80,14 @@ internal static class SqlKind
         private bool openedByFold;     // that string was entered through a folded curly quote
         private string? dollarQuote;   // the $$ or $tag$ quote of the dollar-quoted text we're in
         private bool inBlockComment;   // a /* … */ comment, which can span lines
+        private bool inStatement;      // a token other than white space and comments since the last ';' or \G
 
         internal void Reset()
         {
             inside = '\0';
             dollarQuote = null;
             inBlockComment = false;
+            inStatement = false;
         }
 
         internal string Fold(string input)
@@ -138,10 +140,10 @@ internal static class SqlKind
                 }
 
                 // The comment openers of SqlScanner: -- before white space or the end of the text,
-                // a # that is not a jsonb operator, and /*.
+                // a # before the first token of a statement, and /*.
                 if (inside == '\0' &&
                     ((c == '-' && next == '-' && (i + 2 >= input.Length || char.IsWhiteSpace(input[i + 2]))) ||
-                     (c == '#' && SqlScanner.IsHashComment(input, i))))
+                     (c == '#' && SqlScanner.IsHashComment(inStatement))))
                 {
                     sb?.Append(c);
                     inLineComment = true;
@@ -162,6 +164,17 @@ internal static class SqlKind
                     sb?.Append(quote);
                     i += quote.Length - 1;
                     dollarQuote = quote;
+                    inStatement = true;
+                    continue;
+                }
+
+                // \G ends a statement, as ';' does (mirrors SqlScanner).
+                if (inside == '\0' && c == '\\' && next == 'G')
+                {
+                    sb?.Append(c);
+                    sb?.Append(next);
+                    i++;
+                    inStatement = false;
                     continue;
                 }
 
@@ -224,6 +237,11 @@ internal static class SqlKind
                 }
 
                 char folded = FoldSmartQuote(c);
+
+                if (folded == ';')
+                    inStatement = false;
+                else if (!char.IsWhiteSpace(folded))
+                    inStatement = true;
 
                 if (folded is '\'' or '"' or '`')
                 {

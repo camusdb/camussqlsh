@@ -7,6 +7,8 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDb.SqlSh", "CamusDb.Sq
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "RadLine", "..\Radline\RadLine\RadLine.csproj", "{B5DF40D3-AD2F-4623-810E-E01F38BA05D0}"
 EndProject
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "CamusDb.SqlSh.Tests", "..\CamusDb.SqlSh.Tests\CamusDb.SqlSh.Tests.csproj", "{464BA70B-9869-4BA7-B020-9D536CECF590}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -21,6 +23,10 @@ Global
 		{B5DF40D3-AD2F-4623-810E-E01F38BA05D0}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B5DF40D3-AD2F-4623-810E-E01F38BA05D0}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B5DF40D3-AD2F-4623-810E-E01F38BA05D0}.Release|Any CPU.Build.0 = Release|Any CPU
+		{464BA70B-9869-4BA7-B020-9D536CECF590}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{464BA70B-9869-4BA7-B020-9D536CECF590}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{464BA70B-9869-4BA7-B020-9D536CECF590}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{464BA70B-9869-4BA7-B020-9D536CECF590}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

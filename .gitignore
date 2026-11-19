@@ -1,6 +1,8 @@
 CamusDb.SqlSh/bin
 CamusDb.SqlSh/obj
 CamusDb.SqlSh/.vs
+CamusDb.SqlSh.Tests/bin
+CamusDb.SqlSh.Tests/obj
 Radline/Radline/bin
 Radline/Radline/obj
 Radline/Radline/.vs

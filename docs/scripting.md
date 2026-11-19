@@ -36,11 +36,14 @@ statements at semicolons. It ignores a semicolon in:
 - `$$ … $$` and `$tag$ … $tag$` dollar-quoted text, the body of `CREATE FUNCTION` and of
   `CREATE TRIGGER … LANGUAGE csharp`. The text is raw up to the same quote: it can hold quotes,
   semicolons and comments.
-- `--` and `#` line comments, and `/* */` block comments.
+- `--` line comments and `/* */` block comments.
+- `#` line comments before the first token of a statement.
 
-`#>`, `#>>` and `#-` are `jsonb` operators, not comments. `#--` is a comment. The shell accepts
-doubled quotes (`'it''s'`) and backslash escapes (`'it\'s'`). It removes comments before it sends
-a statement.
+After the first token of a statement, `#` is an operator, not a comment. The server reads `#` as
+XOR, and `#>`, `#>>` and `#-` as `jsonb` operators. The shell sends the rest of the line to the
+server, so `SELECT 5 # -1` returns `-6`. A `#` comment line between two statements, or after the
+`;` that ends a statement, is a comment. The shell accepts doubled quotes (`'it''s'`) and backslash
+escapes (`'it\'s'`). It removes comments before it sends a statement.
 
 The shell stops at the first failure and shows the file and line. `--force` continues past
 failures and shows a summary at the end. A failure in an open transaction always stops the file.

@@ -161,7 +161,7 @@ public sealed class SqlScanner
                 continue;
             }
 
-            if (c == '#' && IsHashComment(text, i))
+            if (c == '#' && IsHashComment(hasContent))
             {
                 OpenComment();
                 Skip(c);
@@ -230,19 +230,17 @@ public sealed class SqlScanner
     }
 
     /// <summary>
-    /// Whether the '#' at <paramref name="i"/> opens a MySQL line comment. It does not when it starts
-    /// a jsonb operator: <c>#&gt;</c> and <c>#&gt;&gt;</c> read a path, and <c>#-</c> deletes one.
-    /// <c>#--</c> stays a comment, so a <c>#-----</c> rule in a dump still reads as one.
+    /// Whether a '#' opens a MySQL line comment. The server reads '#' as XOR, and as the first
+    /// character of the jsonb operators <c>#&gt;</c>, <c>#&gt;&gt;</c> and <c>#-</c>. So a '#' after
+    /// the first token of a statement is an operator, and it goes to the server as typed: to drop the
+    /// rest of the line would run a shorter statement than the one typed. A '#' before the first token
+    /// opens a comment. No statement starts with an operator, so the server cannot run that text, and
+    /// the '#' comment lines between the statements of a script keep working.
     /// </summary>
-    internal static bool IsHashComment(string text, int i)
-    {
-        char next = i + 1 < text.Length ? text[i + 1] : '\0';
-
-        if (next == '>')
-            return false;
-
-        return next != '-' || (i + 2 < text.Length && text[i + 2] == '-');
-    }
+    /// <param name="statementHasContent">
+    /// The statement holds a character other than white space and comments before the '#'.
+    /// </param>
+    internal static bool IsHashComment(bool statementHasContent) => !statementHasContent;
 
     /// <summary>
     /// The dollar quote that starts at <paramref name="start"/>: <c>$$</c>, or <c>$</c>, an identifier
@@ -292,8 +290,9 @@ public sealed class SqlScanner
     }
 
     // Comment text is dropped rather than forwarded: servers disagree on which comment syntaxes they
-    // accept (CamusDB rejects '#'), and a dump full of them shouldn't fail on that. Newlines survive
-    // so the statement keeps its shape and the server's "line N, col M" still lands on the right row.
+    // accept (CamusDB reads '#' as XOR, not as a comment), and a dump full of them shouldn't fail on
+    // that. Newlines survive so the statement keeps its shape and the server's "line N, col M" still
+    // lands on the right row.
     private void Skip(char c)
     {
         if (c == '\n')

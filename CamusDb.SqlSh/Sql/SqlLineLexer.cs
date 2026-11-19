@@ -15,8 +15,10 @@ internal enum SqlTokenKind { Word, Plain, String, Identifier, Comment }
 internal readonly record struct SqlToken(int Start, int Length, SqlTokenKind Kind);
 
 // The state at the end of a line. DollarQuote is the quote that opened the dollar-quoted text
-// ($$ or $tag$), because only the same quote ends it. The default is plain code.
-internal record struct SqlLexState(SqlLexMode Mode, string? DollarQuote);
+// ($$ or $tag$), because only the same quote ends it. InStatement is true when the text after the
+// last ';' or \G holds a token other than white space and comments: a '#' there is an operator, not
+// a comment (see SqlScanner.IsHashComment). The default is plain code before a statement.
+internal record struct SqlLexState(SqlLexMode Mode, string? DollarQuote, bool InStatement = false);
 
 // Splits the lines of the editors into tokens to color. The prompt editor and the full-screen
 // editor use it, so a statement has the same colors in both.
@@ -25,9 +27,10 @@ internal static class SqlLineLexer
     // Splits one line into tokens. The rules are those of SqlScanner, which splits the statements
     // that run: a backslash escapes a character in a string but not in a `quoted identifier`, a
     // doubled delimiter is a literal one, -- opens a comment only before white space or the end of
-    // the line, and a $$ or $tag$ quote opens raw text that only the same quote ends. A shell
-    // command such as \d or /plan at the start of the line is one word, so it keeps its color.
-    // `state` comes in as the state at the start of the line and goes out as the state at its end.
+    // the line, # opens a comment only before the first token of a statement, and a $$ or $tag$
+    // quote opens raw text that only the same quote ends. A shell command such as \d or /plan at
+    // the start of the line is one word, so it keeps its color. `state` comes in as the state at
+    // the start of the line and goes out as the state at its end.
     internal static List<SqlToken> Tokenize(string text, ref SqlLexState state)
     {
         List<SqlToken> tokens = new();
@@ -44,10 +47,19 @@ internal static class SqlLineLexer
                 char next = i + 1 < n ? text[i + 1] : '\0';
 
                 if ((c == '-' && next == '-' && (i + 2 >= n || char.IsWhiteSpace(text[i + 2]))) ||
-                    (c == '#' && SqlScanner.IsHashComment(text, i)))
+                    (c == '#' && SqlScanner.IsHashComment(state.InStatement)))
                 {
                     tokens.Add(new SqlToken(i, n - i, SqlTokenKind.Comment));
                     break;
+                }
+
+                // \G ends a statement, as ';' does (mirrors SqlScanner).
+                if (c == '\\' && next == 'G')
+                {
+                    tokens.Add(new SqlToken(start, 2, SqlTokenKind.Plain));
+                    state.InStatement = false;
+                    i += 2;
+                    continue;
                 }
 
                 if (c == '/' && next == '*')
@@ -58,11 +70,12 @@ internal static class SqlLineLexer
                 else if (c is '\'' or '"' or '`')
                 {
                     state.Mode = c == '\'' ? SqlLexMode.Single : c == '"' ? SqlLexMode.Double : SqlLexMode.Backtick;
+                    state.InStatement = true;
                     i++;
                 }
                 else if (c == '$' && SqlScanner.DollarQuoteAt(text, i) is { } quote)
                 {
-                    state = new SqlLexState(SqlLexMode.Dollar, quote);
+                    state = new SqlLexState(SqlLexMode.Dollar, quote, InStatement: true);
                     i += quote.Length;
                 }
                 else if (c is '\\' or '/' && char.IsLetter(next) && string.IsNullOrWhiteSpace(text[..i]))
@@ -73,6 +86,7 @@ internal static class SqlLineLexer
                         i++;
 
                     tokens.Add(new SqlToken(start, i - start, SqlTokenKind.Word));
+                    state.InStatement = true;
                     continue;
                 }
                 else if (IsWordChar(c))
@@ -81,18 +95,26 @@ internal static class SqlLineLexer
                         i++;
 
                     tokens.Add(new SqlToken(start, i - start, SqlTokenKind.Word));
+                    state.InStatement = true;
                     continue;
                 }
                 else
                 {
                     tokens.Add(new SqlToken(start, 1, SqlTokenKind.Plain));
+
+                    if (c == ';')
+                        state.InStatement = false;
+                    else if (!char.IsWhiteSpace(c))
+                        state.InStatement = true;
+
                     i++;
                     continue;
                 }
             }
 
             // A comment or a quoted text is open here. It opened on this line, or it continues from
-            // the line before.
+            // the line before. Its end goes back to code and keeps InStatement: a comment does not
+            // change it, and a quoted text already set it.
             SqlTokenKind kind = state.Mode switch
             {
                 SqlLexMode.Block => SqlTokenKind.Comment,
@@ -112,7 +134,7 @@ internal static class SqlLineLexer
                 else
                 {
                     i = end + quote.Length;
-                    state = default;
+                    state = state with { Mode = SqlLexMode.Code, DollarQuote = null };
                 }
             }
             else if (state.Mode == SqlLexMode.Block)
@@ -126,7 +148,7 @@ internal static class SqlLineLexer
                 else
                 {
                     i = end + 2;
-                    state = default;
+                    state = state with { Mode = SqlLexMode.Code, DollarQuote = null };
                 }
             }
             else
@@ -152,7 +174,7 @@ internal static class SqlLineLexer
                         }
 
                         i++;
-                        state = default;
+                        state = state with { Mode = SqlLexMode.Code, DollarQuote = null };
                         break;
                     }
 
