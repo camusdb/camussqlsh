@@ -12,9 +12,11 @@ A transaction is open. Run `commit` or `rollback` first.
 
 ```shell
 camus-cli -v
-dotnet nuget locals all --clear
-dotnet tool update --global CamusDB.SqlSh
+dotnet tool update --global CamusDB.SqlSh --no-http-cache
 ```
+
+NuGet caches package feed responses for up to 30 minutes, so an update can miss a version that was
+published recently. `--no-http-cache` reads the feed again.
 
 ## Terminal detection
 
