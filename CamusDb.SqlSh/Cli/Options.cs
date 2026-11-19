@@ -37,6 +37,9 @@ public sealed class Options
     [Option("no-history", Required = false, HelpText = "Do not load or save the statement history")]
     public bool NoHistory { get; set; }
 
+    [Option("read-only", Required = false, HelpText = "Refuse each statement that can change the database or the server. The shell checks the statement before it sends it")]
+    public bool ReadOnly { get; set; }
+
     [Option("allow-insecure-credentials", Required = false, HelpText = "Send credentials to a plaintext http:// endpoint that is not on this machine")]
     public bool AllowInsecureCredentials { get; set; }
 }

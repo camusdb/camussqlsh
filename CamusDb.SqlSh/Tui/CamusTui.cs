@@ -86,10 +86,11 @@ internal sealed class CamusTui
         Func<ColumnValue, string> format,
         IHighlighter highlighter,
         SqlCompletion? completion,
-        TabStore store)
+        TabStore store,
+        bool readOnly)
     {
         _session = new TuiSession(connection, connectionString);
-        _context = new TuiContext(format);
+        _context = new TuiContext(format) { ReadOnly = readOnly };
         _completion = completion;
         _catalog = new CatalogPane(_session, _context, completion);
         _runner = new StatementRunner(_session, _context, _catalog, completion);
@@ -104,9 +105,10 @@ internal sealed class CamusTui
         IHighlighter highlighter,
         SqlCompletion? completion,
         string tabsPath,
-        string legacyQueryPath)
+        string legacyQueryPath,
+        bool readOnly)
     {
-        CamusTui tui = new(connection, connectionString, format, highlighter, completion, new TabStore(tabsPath, legacyQueryPath));
+        CamusTui tui = new(connection, connectionString, format, highlighter, completion, new TabStore(tabsPath, legacyQueryPath), readOnly);
         await tui.LoopAsync();
     }
 
@@ -613,6 +615,7 @@ internal sealed class CamusTui
             return new Markup("[aqua]F1[/], [aqua]ESC[/] or [aqua]Q[/] Close the help  [aqua]↑/↓[/] Scroll  [aqua]CTRL+Q[/] Quit");
 
         string limit = _context.LimitOn ? $"[black on yellow] LIMIT {TuiContext.LimitRows} [/]" : "[grey] no limit [/]";
+        string readOnly = _context.ReadOnly ? "  [black on green] READ-ONLY [/]" : "";
         string tx = _session.Transaction is not null ? "  [black on red] TX OPEN [/]" : "";
 
         // A run in another tab is not in sight, so the footer says where it is.
@@ -622,6 +625,6 @@ internal sealed class CamusTui
             : "";
 
         return new Markup(
-            $"[aqua]CTRL+Q[/] Quit  [aqua]F1[/] Help  [aqua]CTRL+R[/] Run  [aqua]CTRL+G[/] Run all  [aqua]CTRL+T[/] New tab  [aqua]TAB[/] Pane  {limit}{tx}{elsewhere}");
+            $"[aqua]CTRL+Q[/] Quit  [aqua]F1[/] Help  [aqua]CTRL+R[/] Run  [aqua]CTRL+G[/] Run all  [aqua]CTRL+T[/] New tab  [aqua]TAB[/] Pane  {limit}{readOnly}{tx}{elsewhere}");
     }
 }

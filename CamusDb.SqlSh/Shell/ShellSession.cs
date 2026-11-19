@@ -33,14 +33,20 @@ internal sealed class ShellSession
         string connectionString,
         ShellEditor? editor,
         StatementHistory? history,
-        ResultWriter resultWriter)
+        ResultWriter resultWriter,
+        bool readOnly = false)
     {
         Connection = connection;
         ConnectionString = connectionString;
         this.editor = editor;
         this.history = history;
         this.resultWriter = resultWriter;
+        ReadOnly = readOnly;
     }
+
+    // True with --read-only: ReadOnlyGuard refuses each statement that can change the database or the
+    // server, before the shell sends it.
+    public bool ReadOnly { get; }
 
     public CamusConnection Connection { get; private set; }
 
@@ -90,6 +96,9 @@ internal sealed class ShellSession
         // captures every database on the node and needs none of them selected.
         if (IsBackupCommand(sql, out string backupArguments))
         {
+            if (ReadOnly && ReadOnlyGuard.BackupRefusal(backupArguments) is { } backupRefusal)
+                throw new ReadOnlyRefusedException(backupRefusal);
+
             await BackupCommand.ExecuteAsync(Connection, backupArguments);
             return;
         }
@@ -138,6 +147,11 @@ internal sealed class ShellSession
             await DescribeCommand.ListFunctionsAsync(Connection, functionsVerbose, functionsPattern);
             return;
         }
+
+        // The shell commands above only read, or check their own work. Each SQL statement is checked
+        // here, before it goes to the server.
+        if (ReadOnly)
+            ReadOnlyGuard.Check(sql);
 
         if (IsSystemLevelQuery(sql))
             await ExecuteQuery(await OpenEndpointConnectionAsync(), sql, vertical);

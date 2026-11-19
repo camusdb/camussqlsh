@@ -110,8 +110,9 @@ internal static class ScriptRunner
                 AnsiConsole.MarkupLine("[red]{0}:{1}[/]", Markup.Escape(path), statement.Line);
 
                 // An open transaction is aborted server-side by the failure, so every remaining statement
-                // would fail too. Stop regardless of --force and let the caller reset it.
-                if (!force || session.Transaction is not null)
+                // would fail too. Stop regardless of --force and let the caller reset it. A statement
+                // that --read-only refused did not go to the server, so --force can go on after it.
+                if (!force || (session.Transaction is not null && ex is not ReadOnlyRefusedException))
                     throw;
 
                 ErrorReporter.WriteStatementError(ex, statement.Sql);

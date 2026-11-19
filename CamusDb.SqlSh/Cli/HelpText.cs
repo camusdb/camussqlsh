@@ -36,6 +36,8 @@ internal static class HelpText
         AnsiConsole.MarkupLine("                                machine. Refused without it, because the password and the token");
         AnsiConsole.MarkupLine("                                would cross the network in the clear");
         AnsiConsole.MarkupLine("  --no-history                  Do not load or save the statement history");
+        AnsiConsole.MarkupLine("  --read-only                   Refuse each statement that can change the database or the");
+        AnsiConsole.MarkupLine("                                server. The shell checks it before it sends it");
         AnsiConsole.MarkupLine("  --tui                         Open the full-screen browser: catalog, editor and results");
         AnsiConsole.MarkupLine("                                in three panes. TAB moves between panes, F5 runs the query");
         AnsiConsole.MarkupLine("  --force-rich                  Force the rich line editor (colors, multiline, Tab completion)");

@@ -40,6 +40,9 @@ internal sealed class TuiContext
 
     public Func<ColumnValue, string> Format { get; }
 
+    /// <summary>True with --read-only: the runner refuses each statement that can change the database or the server.</summary>
+    public bool ReadOnly { get; init; }
+
     /// <summary>True while the row cap is on. F2 changes it.</summary>
     public bool LimitOn { get; set; } = true;
 

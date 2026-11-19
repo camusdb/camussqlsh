@@ -29,6 +29,14 @@ if (!CommandLineArgs.RequestsStructuredOutput(args))
 int workloadIdx = Array.FindIndex(args, a => string.Equals(a, "workload", StringComparison.OrdinalIgnoreCase));
 if (workloadIdx >= 0)
 {
+    // A workload creates tables and writes rows. Each of its statements would be refused.
+    if (Array.Exists(args, a => string.Equals(a, "--read-only", StringComparison.OrdinalIgnoreCase)))
+    {
+        AnsiConsole.MarkupLine("[red]A workload creates tables and writes rows, so it cannot run with --read-only.[/]");
+        Environment.ExitCode = 1;
+        return;
+    }
+
     // Collect flags that appeared before "workload" and append them after
     string[] beforeWorkload = args[..workloadIdx];
     string[] afterWorkload = args[(workloadIdx + 1)..];
@@ -148,7 +156,7 @@ if (connected is null)
 
 // Tell the user where and how they connected, unless they're scripting with -e/-f (keep stdout clean).
 if (!nonInteractive)
-    ConnectionSetup.WriteBanner(connectionString);
+    ConnectionSetup.WriteBanner(connectionString, opts.ReadOnly);
 
 // Set only for --format json|yaml, which is refused above outside -e and -f.
 ResultWriter resultWriter = new(outputFormat == OutputFormat.Table
@@ -157,13 +165,13 @@ ResultWriter resultWriter = new(outputFormat == OutputFormat.Table
 
 if (nonInteractive)
 {
-    await ScriptRunner.RunAsync(new ShellSession(connection, connectionString, editor: null, history, resultWriter), opts);
+    await ScriptRunner.RunAsync(new ShellSession(connection, connectionString, editor: null, history, resultWriter, opts.ReadOnly), opts);
     return;
 }
 
 ShellEditor? editor = LineEditor.IsSupported(AnsiConsole.Console) ? ShellEditor.Create(history) : null;
 
-ShellSession session = new(connection, connectionString, editor, history, resultWriter);
+ShellSession session = new(connection, connectionString, editor, history, resultWriter, opts.ReadOnly);
 
 session.RegisterCancelKeyHandler();
 
@@ -187,7 +195,8 @@ if (tuiMode)
         editor.Highlighter,
         editor.Completion,
         UserPaths.TuiTabsPath,
-        UserPaths.QueryScratchPath);
+        UserPaths.QueryScratchPath,
+        opts.ReadOnly);
 
     return;
 }

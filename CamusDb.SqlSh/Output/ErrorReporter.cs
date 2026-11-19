@@ -18,6 +18,15 @@ internal static class ErrorReporter
     // actually fixes it, since "insufficient privilege" alone doesn't say which grant is missing.
     internal static void WriteStatementError(Exception ex, string? sql)
     {
+        // The shell refused the statement itself, so there is no server error code to show.
+        if (ex is ReadOnlyRefusedException refused)
+        {
+            AnsiConsole.MarkupLine("[red]Refused by --read-only[/]: {0}", Markup.Escape(refused.Reason));
+            AnsiConsole.MarkupLine("[grey58]The shell did not send the statement. To run writes, start the shell without[/] [cyan]--read-only[/][grey58].[/]");
+            AnsiConsole.WriteLine();
+            return;
+        }
+
         string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
 
         AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));

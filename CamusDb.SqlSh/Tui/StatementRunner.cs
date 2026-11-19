@@ -166,6 +166,11 @@ internal sealed class StatementRunner
             return;
         }
 
+        // The refusal stops the run, as a failed statement does. The server did not see the statement,
+        // so an open transaction stays open.
+        if (_context.ReadOnly)
+            ReadOnlyGuard.Check(sql);
+
         bool needsDb = !IsServerLevelDDL(sql) && !IsSystemLevelQuery(sql);
 
         if (needsDb && !_session.HasDatabase)

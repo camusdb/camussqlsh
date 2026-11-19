@@ -71,8 +71,8 @@ internal static class ConnectionSetup
         return (connection, activeConnectionString);
     }
 
-    // Tells the user where and how they connected.
-    internal static void WriteBanner(string connectionString)
+    // Tells the user where and how they connected, and that the session refuses writes with --read-only.
+    internal static void WriteBanner(string connectionString, bool readOnly)
     {
         string server = GetConnValue(connectionString, "Endpoint") ?? "unknown server";
         string database = GetConnValue(connectionString, "Database") is { Length: > 0 } db
@@ -88,7 +88,12 @@ internal static class ConnectionSetup
 
         AnsiConsole.MarkupLine(
             $"[grey58]Connected to[/] [white]{Markup.Escape(server)}[/] [grey58]over[/] " +
-            $"[white]{DescribeTransport(connectionString)}[/][grey58], database:[/] {database}{identity}\n");
+            $"[white]{DescribeTransport(connectionString)}[/][grey58], database:[/] {database}{identity}");
+
+        if (readOnly)
+            AnsiConsole.MarkupLine("[yellow]Read-only:[/] [grey58]the shell refuses each statement that can change the database or the server.[/]");
+
+        AnsiConsole.WriteLine();
     }
 
     // Builds the ordered list of connection strings to try. gRPC is preferred and REST is the

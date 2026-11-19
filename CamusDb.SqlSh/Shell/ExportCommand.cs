@@ -35,6 +35,10 @@ internal static class ExportCommand
             return;
         }
 
+        // A query can still write: ANALYZE, a locking read, or a call of nextval.
+        if (session.ReadOnly)
+            ReadOnlyGuard.Check(query);
+
         if (!systemLevel && !HasDatabase(session.ConnectionString))
         {
             AnsiConsole.MarkupLine("[red]No database selected.[/] Use [cyan]use <database>[/] to select one.\n");
