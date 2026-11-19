@@ -157,10 +157,16 @@ internal sealed class ShellSession
             await ExecuteQuery(await OpenEndpointConnectionAsync(), sql, vertical);
         else if (IsQueryable(sql))
             await ExecuteQuery(Connection, sql, vertical);
+        // The server runs a statement for the whole server (a database, a user, a grant, a cluster
+        // setting, a cancel) outside every transaction, and ignores transaction IDs that come with it.
+        // So none go with it.
         else if (IsServerLevelDDL(sql))
-            await ExecuteDDL(await OpenEndpointConnectionAsync(), sql);
+            await ExecuteDDL(await OpenEndpointConnectionAsync(), sql, transaction: null);
+        // DDL in the database goes in the open transaction, so the server decides whether it can run
+        // there. TRUNCATE cannot: the client refuses it with CADB0538, and the server refuses it too. Sent
+        // outside the transaction, it emptied the table and a later ROLLBACK did not undo that.
         else if (IsDDL(sql))
-            await ExecuteDDL(Connection, sql);
+            await ExecuteDDL(Connection, sql, Transaction);
         else if (IsBeginTx(sql))
             await ExecuteBeginTx();
         else if (IsCommitTx(sql))
@@ -192,15 +198,29 @@ internal sealed class ShellSession
         return ConnectionHelper.OpenAsync(GetEndpointConnectionString(ConnectionString));
     }
 
-    // A failed statement aborts the transaction server-side, so the local handle is now stale: any
-    // further command (including rollback) would fail with "Unknown transaction". Drops the handle so
-    // the shell returns to autocommit, and returns true when there was one to drop.
-    public bool DiscardTransaction()
+    // A failed statement ends the open transaction: the shell drops the handle and returns to
+    // autocommit. A failure on the server already rolled the transaction back there. A statement that
+    // the client refused, such as TRUNCATE in a transaction (CADB0538), did not reach the server, so the
+    // transaction is still open there and keeps its locks. The rollback here ends it. When the server
+    // ended it already, the rollback fails ("Unknown transaction"), and that is not an error here.
+    // Returns true when there was a handle to drop.
+    public async Task<bool> DiscardTransactionAsync()
     {
-        if (Transaction is null)
+        if (Transaction is not { } transaction)
             return false;
 
         Transaction = null;
+
+        try
+        {
+            await transaction.RollbackAsync().WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception)
+        {
+            // The server ended the transaction already, or it did not answer in time. If it is still
+            // open, the server ends it when it times out.
+        }
+
         return true;
     }
 
@@ -393,11 +413,12 @@ internal sealed class ShellSession
         ResultWriter.WriteAffectedRows(reader.RecordsAffected, duration);
     }
 
-    private static async Task ExecuteDDL(CamusConnection connection, string sql)
+    private static async Task ExecuteDDL(CamusConnection connection, string sql, CamusTransaction? transaction)
     {
         using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
         cmd.CommandTimeout = 60;
+        cmd.Transaction = transaction;
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 

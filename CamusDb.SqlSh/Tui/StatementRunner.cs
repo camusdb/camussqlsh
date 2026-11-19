@@ -141,7 +141,7 @@ internal sealed class StatementRunner
         }
     }
 
-    private async Task RunStatementAsync(ResultView results, string sql, RunLog log, CancellationToken token)
+    internal async Task RunStatementAsync(ResultView results, string sql, RunLog log, CancellationToken token)
     {
         if (string.IsNullOrWhiteSpace(sql))
             return;
@@ -191,19 +191,23 @@ internal sealed class StatementRunner
         {
             log.Add(await QueryAsync(results, connection, sql, log, token));
         }
+        // The server runs a statement for the whole server outside every transaction, and ignores
+        // transaction IDs that come with it (mirrors ShellSession).
         else if (IsServerLevelDDL(sql))
         {
             await using CamusConnection sys = await _session.OpenEndpointAsync();
-            await DdlAsync(sys, sql);
+            await DdlAsync(sys, sql, transaction: null);
             log.Add($"OK ({stopwatch.Elapsed})");
 
             // CREATE, DROP and RENAME DATABASE change the database list in the catalog.
             if (IsDatabaseDDL(sql))
                 await _catalog.LoadAsync();
         }
+        // DDL in the database goes in the open transaction, so the server decides whether it can run
+        // there. TRUNCATE cannot, and fails with CADB0538 (mirrors ShellSession).
         else if (IsDDL(sql))
         {
-            await DdlAsync(connection, sql);
+            await DdlAsync(connection, sql, _session.Transaction);
             log.Add($"OK ({stopwatch.Elapsed})");
 
             // A CREATE or DROP changes what the catalog should show.
@@ -269,10 +273,11 @@ internal sealed class StatementRunner
         }
     }
 
-    private static async Task DdlAsync(CamusConnection connection, string sql)
+    private static async Task DdlAsync(CamusConnection connection, string sql, CamusTransaction? transaction)
     {
         using CamusCommand cmd = connection.CreateCamusCommand(sql);
         cmd.CommandTimeout = 60;
+        cmd.Transaction = transaction;
 
         await cmd.ExecuteDDLAsync();
     }

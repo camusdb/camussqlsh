@@ -68,6 +68,10 @@ internal static class ScriptRunner
 
             ErrorReporter.WriteStatementError(ex, failedSql);
             Environment.ExitCode = 1;
+
+            // The run stops here. A transaction that is still open is rolled back now, so the server
+            // does not keep it and its locks until it times out.
+            await session.DiscardTransactionAsync();
         }
     }
 

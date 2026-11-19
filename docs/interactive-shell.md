@@ -164,9 +164,15 @@ not exist in the current context
 The shell tracks the transaction that `begin` (or `start transaction`) opens:
 
 - Only one transaction can be open at a time.
+- Each statement goes in the open transaction, DDL too. The server decides whether a statement can
+  run in a transaction. `TRUNCATE` cannot, because a `ROLLBACK` cannot undo it: it fails with
+  `CADB0538`.
+- A statement for the whole server runs outside the transaction, and `rollback` does not undo it.
+  These statements are `CREATE`, `DROP` and `RENAME DATABASE`, the user and grant statements, the
+  cluster settings and `CANCEL QUERY`.
 - The exit commands do not work while a transaction is open. Run `commit` or `rollback` first.
-- If `commit`, `rollback` or a statement in the transaction fails, the shell forgets the
-  transaction.
+- If a statement in the transaction fails, the shell rolls back the transaction and forgets it. If
+  `commit` or `rollback` fails, the shell forgets the transaction.
 
 See [Transactions](https://camusdb.github.io/docs/sql-transactions/) for the server side.
 

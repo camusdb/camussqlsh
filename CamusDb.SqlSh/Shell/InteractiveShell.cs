@@ -135,7 +135,7 @@ internal sealed class InteractiveShell
                 // A failed statement aborts the transaction server-side, so the shell drops its handle
                 // and returns to a consistent, autocommit state. A statement that --read-only refused
                 // did not go to the server, so the transaction is still open.
-                if (ex is not ReadOnlyRefusedException && session.DiscardTransaction())
+                if (ex is not ReadOnlyRefusedException && await session.DiscardTransactionAsync())
                 {
                     pendingSql.Clear();
                     AnsiConsole.MarkupLine("[yellow]The active transaction was aborted and has been rolled back.[/]\n");
