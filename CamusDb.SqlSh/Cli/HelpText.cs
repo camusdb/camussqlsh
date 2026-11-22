@@ -148,6 +148,9 @@ internal static class HelpText
         AnsiConsole.MarkupLine("                                The one span that holds a row. Fifteen columns, so");
         AnsiConsole.MarkupLine("                                append [cyan]\\G[/] for vertical output");
         AnsiConsole.MarkupLine("  [cyan]show engine stats[/]             Runtime engine metrics for the node answering");
+        AnsiConsole.MarkupLine("  [cyan]show partitions[/]               The Raft partitions as [white]this node[/] sees them: leader,");
+        AnsiConsole.MarkupLine("                                term, replicas, write load and follower lag. Needs a");
+        AnsiConsole.MarkupLine("                                superuser; 24 columns, so append [cyan]\\G[/] for vertical output");
         AnsiConsole.MarkupLine("  [cyan]show slow queries[/] [[like '<pattern>']]");
         AnsiConsole.MarkupLine("                                What [white]this node[/] recorded over its slow-query threshold,");
         AnsiConsole.MarkupLine("                                newest first. Off by default, and lost on restart;");

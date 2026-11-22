@@ -50,7 +50,8 @@ internal static class DescribeCommand
     // holds whether the view holds data.
     private sealed record Relation(string Name, RelationKind Kind, Dictionary<string, ColumnValue> Row);
 
-    private sealed record IndexInfo(string Name, string Table, bool Unique, string[] Columns, string[] Directions, string Include, string Type, string? Comment);
+    // `KeyList` is the key part of the line, for example "year DESC, price".
+    private sealed record IndexInfo(string Name, string Table, bool Unique, string KeyList, string Include, string Type, string? Comment);
 
     // The parts of a SHOW CREATE TABLE statement that SHOW COLUMNS and SHOW INDEXES do not give.
     private sealed class TableDefinition
@@ -493,8 +494,7 @@ internal static class DescribeCommand
                 Name: Text(row, "Key_name") ?? "",
                 Table: Text(row, "Table") ?? relation,
                 Unique: Text(row, "Non_unique") == "0",
-                Columns: SplitList(Text(row, "Columns")),
-                Directions: SplitList(Text(row, "Directions")),
+                KeyList: IndexKeyList(Text(row, "Columns"), Text(row, "Directions"), Text(row, "Key")),
                 Include: Text(row, "Include") ?? "",
                 Type: Text(row, "Index_type") ?? "",
                 Comment: Text(row, "Comment")));
@@ -631,20 +631,7 @@ internal static class DescribeCommand
             if (index.Type.Length > 0 && !index.Type.Equals("ORDERED", StringComparison.OrdinalIgnoreCase))
                 line.Append(' ').Append(index.Type);
 
-            line.Append(" (");
-
-            for (int i = 0; i < index.Columns.Length; i++)
-            {
-                if (i > 0)
-                    line.Append(", ");
-
-                line.Append(index.Columns[i]);
-
-                if (i < index.Directions.Length && index.Directions[i].Equals("DESC", StringComparison.OrdinalIgnoreCase))
-                    line.Append(" DESC");
-            }
-
-            line.Append(')');
+            line.Append(" (").Append(index.KeyList).Append(')');
 
             if (index.Include.Length > 0)
                 line.Append(" INCLUDE (").Append(string.Join(", ", SplitList(index.Include))).Append(')');
@@ -735,6 +722,40 @@ internal static class DescribeCommand
             ColumnType.Date or ColumnType.DateTime => value.IsoValue,
             _ => null,
         };
+    }
+
+    // The key list of an index for `\d`, from the SHOW INDEXES row: "year DESC, price".
+    //
+    // `Columns` and `Directions` are two lists in the same order, so the shell joins them. An expression
+    // index (server 52a00f7b) writes an expression part of `Columns` as (expr), and an expression can
+    // hold commas, so `Columns` cannot be split then. For such an index the shell shows `Key`, the key
+    // list as CREATE INDEX takes it. `Key` quotes each column name with backticks, so a plain index
+    // keeps the join, which shows the names without quotes as before. A server older than expression
+    // indexes sends no `Key`.
+    internal static string IndexKeyList(string? columns, string? directions, string? key)
+    {
+        string[] names = SplitList(columns);
+        string[] orders = SplitList(directions);
+
+        bool hasExpression = names.Any(n => n.StartsWith('(')) || (orders.Length > 0 && orders.Length != names.Length);
+
+        if (hasExpression && !string.IsNullOrEmpty(key))
+            return key;
+
+        StringBuilder list = new();
+
+        for (int i = 0; i < names.Length; i++)
+        {
+            if (i > 0)
+                list.Append(", ");
+
+            list.Append(names[i]);
+
+            if (i < orders.Length && orders[i].Equals("DESC", StringComparison.OrdinalIgnoreCase))
+                list.Append(" DESC");
+        }
+
+        return list.ToString();
     }
 
     private static string[] SplitList(string? value)

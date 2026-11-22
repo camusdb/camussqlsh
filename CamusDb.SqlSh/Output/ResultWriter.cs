@@ -98,6 +98,20 @@ internal sealed class ResultWriter
         AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})\n", elapsed);
     }
 
+    // "Query OK", then one gray line of detail under it, such as the modes of a transaction. With a
+    // null detail, this is the same as WriteQueryOk(elapsed).
+    public static void WriteQueryOk(TimeSpan elapsed, string? detail)
+    {
+        if (detail is null)
+        {
+            WriteQueryOk(elapsed);
+            return;
+        }
+
+        AnsiConsole.MarkupLine("Query OK, [blue]0[/] rows affected ({0})", elapsed);
+        AnsiConsole.MarkupLine("[grey58]{0}[/]\n", Markup.Escape(detail));
+    }
+
     public static void WriteRowsInSet(int rows, TimeSpan elapsed)
     {
         AnsiConsole.MarkupLine("[blue]{0}[/] rows in set ({1})\n", rows, elapsed);

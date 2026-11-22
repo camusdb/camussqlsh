@@ -31,14 +31,19 @@ internal sealed class ShellEditor
     // extensions, which are known only after the connection opens, are colored like the built-ins.
     private static readonly Style FunctionStyle = new(foreground: Color.Lime);
 
-    private ShellEditor(LineEditor editor, WordHighlighter highlighter, SqlCompletion completion)
+    private ShellEditor(LineEditor editor, PromptKeys keys, WordHighlighter highlighter, SqlCompletion completion)
     {
         Editor = editor;
+        Keys = keys;
         Highlighter = highlighter;
         Completion = completion;
     }
 
     public LineEditor Editor { get; }
+
+    // The editor reads its keys from here. While a statement runs, a watch on the same keys lets ESC
+    // and Ctrl+C cancel it.
+    public PromptKeys Keys { get; }
 
     public WordHighlighter Highlighter { get; }
 
@@ -80,7 +85,9 @@ internal sealed class ShellEditor
             .. SqlVocabulary.Commands,
             .. SqlVocabulary.Constants]);
 
-        LineEditor editor = new()
+        PromptKeys keys = new();
+
+        LineEditor editor = new(source: keys)
         {
             MultiLine = true,
             Text = "",
@@ -111,7 +118,7 @@ internal sealed class ShellEditor
                 editor.History.Add(item);
         }
 
-        return new ShellEditor(editor, worldHighlighter, sqlCompletion);
+        return new ShellEditor(editor, keys, worldHighlighter, sqlCompletion);
     }
 
     // Loads the names that only the server knows: the tables and the inline functions of the

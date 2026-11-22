@@ -54,10 +54,18 @@ internal sealed class ShellSession
 
     public CamusTransaction? Transaction { get; private set; }
 
+    // True when a schema statement ran in the open transaction. With the server setting
+    // transactional_ddl_enabled on, other sessions do not see the change until COMMIT. The editor
+    // vocabulary loads outside the transaction, so it loads again when the transaction ends.
+    private bool transactionChangedSchema;
+
     // Null without the rich editor, and always null for -e and -f.
     public LineEditor? LineEditor => editor?.Editor;
 
     public SqlCompletion? Completion => editor?.Completion;
+
+    // The keys of the rich editor. Null without it.
+    public PromptKeys? Keys => editor?.Keys;
 
     // `fromPrompt` is true for a line typed at the prompt, where the shell can ask the user a question.
     public async Task ExecuteSql(string input, bool fromPrompt = false)
@@ -153,30 +161,80 @@ internal sealed class ShellSession
         if (ReadOnly)
             ReadOnlyGuard.Check(sql);
 
+        bool write = !IsQueryable(sql) && !IsSystemLevelQuery(sql);
+
+        await RunCancellableAsync(token => ExecuteServerStatement(sql, vertical, token), fromPrompt, write);
+    }
+
+    // Runs `run` with a token that ESC and Ctrl+C cancel, for a statement typed at the prompt. A
+    // cancel becomes a StatementCancelledException. Only the rich editor reads the keys this way: in a
+    // script, -e, or a prompt without the rich editor, Ctrl+C is a signal that ends the shell.
+    // `write` is true for a statement that can change data.
+    public async Task RunCancellableAsync(Func<CancellationToken, Task> run, bool fromPrompt, bool write)
+    {
+        if (!fromPrompt || editor is null)
+        {
+            await run(CancellationToken.None);
+            return;
+        }
+
+        // In a transaction, the prompt rolls the whole transaction back after a cancel. Outside one,
+        // the server commits a write by itself, and a cancel that arrives late does not undo it.
+        bool autocommitWrite = write && Transaction is null;
+
+        Stopwatch stopwatch = Stopwatch.StartNew();
+
+        await using CancelWatch watch = editor.Keys.Watch();
+
+        try
+        {
+            await run(watch.Token);
+        }
+        catch (Exception ex) when (watch.Cancelled)
+        {
+            throw new StatementCancelledException(watch.CancelKey ?? "ESC", stopwatch.Elapsed, autocommitWrite, ex);
+        }
+    }
+
+    // The statements that go to the server. The client stops a call when `token` is cancelled. Over
+    // REST, the server then stops the work too. Over gRPC, CamusDB.Client 0.19.4 only stops its own
+    // wait, because its batched stream sends the server no cancel, and the server finishes the work.
+    private async Task ExecuteServerStatement(string sql, bool vertical, CancellationToken token)
+    {
         if (IsSystemLevelQuery(sql))
-            await ExecuteQuery(await OpenEndpointConnectionAsync(), sql, vertical);
+            await ExecuteQuery(await OpenEndpointConnectionAsync(), sql, vertical, token);
         else if (IsQueryable(sql))
-            await ExecuteQuery(Connection, sql, vertical);
+            await ExecuteQuery(Connection, sql, vertical, token);
         // The server runs a statement for the whole server (a database, a user, a grant, a cluster
         // setting, a cancel) outside every transaction, and ignores transaction IDs that come with it.
         // So none go with it.
         else if (IsServerLevelDDL(sql))
-            await ExecuteDDL(await OpenEndpointConnectionAsync(), sql, transaction: null);
+            await ExecuteDDL(await OpenEndpointConnectionAsync(), sql, transaction: null, token);
         // DDL in the database goes in the open transaction, so the server decides whether it can run
         // there. TRUNCATE cannot: the client refuses it with CADB0538, and the server refuses it too. Sent
-        // outside the transaction, it emptied the table and a later ROLLBACK did not undo that.
+        // outside the transaction, it emptied the table and a later ROLLBACK did not undo that. With the
+        // server setting transactional_ddl_enabled on, COMMIT and ROLLBACK also apply to CREATE, ALTER
+        // and DROP, and the server refuses with CADB0538 each schema statement that it cannot yet run in
+        // a transaction. With the setting off, a schema statement commits at once.
         else if (IsDDL(sql))
-            await ExecuteDDL(Connection, sql, Transaction);
+        {
+            await ExecuteDDL(Connection, sql, Transaction, token);
+
+            if (Transaction is not null)
+                transactionChangedSchema = true;
+        }
+        // BEGIN, COMMIT and ROLLBACK do not take the token. A COMMIT that stops halfway leaves the
+        // client with no way to know whether the transaction committed.
         else if (IsBeginTx(sql))
-            await ExecuteBeginTx();
+            await ExecuteBeginTx(sql);
         else if (IsCommitTx(sql))
             await ExecuteCommitTx();
         else if (IsRollbackTx(sql))
             await ExecuteRollbackTx();
         else if (IsReturningWrite(sql))
-            await ExecuteWrite(sql, vertical);
+            await ExecuteWrite(sql, vertical, token);
         else
-            await ExecuteNonQuery(sql);
+            await ExecuteNonQuery(sql, token);
     }
 
     // Points the shell at another database by reopening the connection against it — there is no
@@ -221,7 +279,34 @@ internal sealed class ShellSession
             // open, the server ends it when it times out.
         }
 
+        await OnTransactionEndedAsync();
+
         return true;
+    }
+
+    // Loads the editor vocabulary again when the transaction that ended ran a schema statement. The
+    // relations, the indexes, the inline functions and the triggers can all change. A failed load
+    // keeps the old names, because the statement itself completed.
+    private async Task OnTransactionEndedAsync()
+    {
+        if (!transactionChangedSchema)
+            return;
+
+        transactionChangedSchema = false;
+
+        if (editor is null || !HasDatabase(ConnectionString))
+            return;
+
+        try
+        {
+            await editor.RefreshDatabaseVocabularyAsync(Connection);
+            await editor.RefreshInlineFunctionsAsync(Connection);
+            await editor.Completion.RefreshTriggersAsync(Connection);
+        }
+        catch (Exception)
+        {
+            // The completion keeps the names it had.
+        }
     }
 
     // Loads again the names of the current database that the editor completes and colors: the
@@ -297,7 +382,7 @@ internal sealed class ShellSession
         };
     }
 
-    private async Task ExecuteNonQuery(string sql)
+    private async Task ExecuteNonQuery(string sql, CancellationToken token)
     {
         await using CamusCommand cmd = Connection.CreateCamusCommand(sql);
 
@@ -306,12 +391,15 @@ internal sealed class ShellSession
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        int affected = await cmd.ExecuteNonQueryAsync();
+        int affected = await cmd.ExecuteNonQueryAsync(token);
 
         ResultWriter.WriteAffectedRows(affected, stopwatch.Elapsed);
     }
 
-    private async Task ExecuteBeginTx()
+    // BEGIN and START TRANSACTION, with their modes: BEGIN READ ONLY declares a read-only transaction,
+    // and the server then refuses its writes with CADB0849. The shell reads the modes, because it
+    // opens the transaction through the client and does not send the BEGIN text.
+    private async Task ExecuteBeginTx(string sql)
     {
         if (Transaction is not null)
         {
@@ -319,11 +407,16 @@ internal sealed class ShellSession
             return;
         }
 
+        CamusTransactionOptions options = BeginStatement.Parse(sql);
+
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        Transaction = await Connection.BeginTransactionAsync();
+        Transaction = await Connection.BeginTransactionAsync(options);
+        transactionChangedSchema = false;
 
-        ResultWriter.WriteQueryOk(stopwatch.Elapsed);
+        string? modes = BeginStatement.DescribeModes(options);
+
+        ResultWriter.WriteQueryOk(stopwatch.Elapsed, modes is null ? null : $"Transaction: {modes}");
     }
 
     private async Task ExecuteCommitTx()
@@ -336,15 +429,26 @@ internal sealed class ShellSession
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
+        CamusTransaction transaction = Transaction;
+
         try
         {
-            await Transaction.CommitAsync();
-            ResultWriter.WriteQueryOk(stopwatch.Elapsed);
+            await transaction.CommitAsync();
+            ResultWriter.WriteQueryOk(stopwatch.Elapsed, CommitDetail(transaction));
         }
         finally
         {
             Transaction = null;
+            await OnTransactionEndedAsync();
         }
+    }
+
+    // The commit timestamp puts the commit in its order among the other commits of the cluster. It shows
+    // as HLC(N:L:C), the format of the server logs. It is null for a transaction that wrote nothing, and
+    // from a server older than CamusDB 0.18.4. The shell then shows no detail.
+    internal static string? CommitDetail(CamusTransaction transaction)
+    {
+        return transaction.CommitTimestamp is { } timestamp ? $"Commit timestamp: {timestamp}" : null;
     }
 
     private async Task ExecuteRollbackTx()
@@ -365,10 +469,11 @@ internal sealed class ShellSession
         finally
         {
             Transaction = null;
+            await OnTransactionEndedAsync();
         }
     }
 
-    private async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical = false)
+    private async Task ExecuteQuery(CamusConnection connection, string sql, bool vertical, CancellationToken token)
     {
         await using CamusCommand cmd = connection.CreateSelectCommand(sql);
 
@@ -377,7 +482,9 @@ internal sealed class ShellSession
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        // The client reads every row before ExecuteReaderAsync returns, so the token covers all the
+        // work on the server. The loops that write the rows read from memory.
+        await using CamusDataReader reader = await cmd.ExecuteReaderAsync(token);
 
         TimeSpan duration = stopwatch.Elapsed;
 
@@ -394,7 +501,7 @@ internal sealed class ShellSession
     // the shape: a RETURNING list gives a reader with columns, and any other write gives a reader with
     // no columns. Either way RecordsAffected is the written-row count, so the footer reads the same as
     // for a write without RETURNING.
-    private async Task ExecuteWrite(string sql, bool vertical)
+    private async Task ExecuteWrite(string sql, bool vertical, CancellationToken token)
     {
         await using CamusCommand cmd = Connection.CreateCamusCommand(sql);
 
@@ -403,7 +510,7 @@ internal sealed class ShellSession
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        await using CamusDataReader reader = await cmd.ExecuteReaderAsync(token);
 
         TimeSpan duration = stopwatch.Elapsed;
 
@@ -413,7 +520,7 @@ internal sealed class ShellSession
         ResultWriter.WriteAffectedRows(reader.RecordsAffected, duration);
     }
 
-    private static async Task ExecuteDDL(CamusConnection connection, string sql, CamusTransaction? transaction)
+    private static async Task ExecuteDDL(CamusConnection connection, string sql, CamusTransaction? transaction, CancellationToken token)
     {
         using CamusCommand cmd = connection.CreateCamusCommand(sql);
 
@@ -422,7 +529,7 @@ internal sealed class ShellSession
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        bool success = await cmd.ExecuteDDLAsync();
+        bool success = await cmd.ExecuteDDLAsync(token);
 
         if (success)
             ResultWriter.WriteQueryOk(stopwatch.Elapsed);

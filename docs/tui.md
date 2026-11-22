@@ -71,6 +71,9 @@ shows the tabs: a number and the first line of text. The active tab has a yellow
 
 - All tabs use one connection. Thus `use`, the current database and an open transaction apply to
   all tabs. A `BEGIN` in one tab and a `COMMIT` in another tab end the same transaction.
+- `BEGIN` takes the same transaction modes as at the prompt, for example `BEGIN READ ONLY`. The status
+  line shows the modes after `BEGIN`, and the commit timestamp after `COMMIT`. See
+  [Transactions](interactive-shell.md#transactions).
 - One statement runs at a time. You can change tabs while it runs. Its rows go to the tab where it
   started. In another tab, the key bar shows `RUNNING IN TAB n`. `Esc` cancels the run from any tab.
 - There can be at most 9 tabs.

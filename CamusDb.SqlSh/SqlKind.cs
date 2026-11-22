@@ -419,12 +419,12 @@ internal static class SqlKind
         return StartsWithWords(sql, "explain");
     }
 
+    // BEGIN and START TRANSACTION, with or without modes. The words are matched as words, so a
+    // statement such as `startup …` is not a BEGIN. BeginStatement reads the modes, and gives an error
+    // for a START that TRANSACTION does not follow.
     internal static bool IsBeginTx(string sql)
     {
-        string trimmedSql = sql.Trim();
-    
-        return trimmedSql.StartsWith("begin", StringComparison.InvariantCultureIgnoreCase) ||
-               trimmedSql.StartsWith("start", StringComparison.InvariantCultureIgnoreCase);
+        return StartsWithWords(sql, "begin") || StartsWithWords(sql, "start");
     }
 
     internal static bool IsCommitTx(string sql)
@@ -526,7 +526,12 @@ internal static class SqlKind
                // the node that answered and reads from no database, so it runs on the endpoint
                // connection. EXTENSIONS is a plain identifier to the parser, so the prefix is matched
                // by words.
-               StartsWithWords(trimmedSql, "show", "extensions");
+               StartsWithWords(trimmedSql, "show", "extensions") ||
+               // The Raft partitions as this node sees them. The statement reads only the node's
+               // in-memory Raft state, opens no database and runs in no transaction, so it runs on the
+               // endpoint connection. PARTITIONS is a plain identifier to the parser, so the prefix is
+               // matched by words.
+               StartsWithWords(trimmedSql, "show", "partitions");
     }
 
     // User and grant administration is server-level: like database DDL, these statements name their

@@ -27,6 +27,26 @@ internal static class ErrorReporter
             return;
         }
 
+        // The user stopped the statement with ESC or Ctrl+C. That is not an error of the statement.
+        if (ex is StatementCancelledException cancelled)
+        {
+            AnsiConsole.MarkupLine("[yellow]Cancelled[/] with [cyan]{0}[/] ({1})", Markup.Escape(cancelled.Key), cancelled.Elapsed);
+
+            if (cancelled.AutocommitWrite)
+                AnsiConsole.MarkupLine("[grey58]A write outside a transaction commits by itself. If the server finished it before the cancel arrived, the change stays.[/]");
+
+            AnsiConsole.WriteLine();
+            return;
+        }
+
+        // The shell reads the modes of BEGIN itself, so the server did not see the statement.
+        if (ex is TransactionModeException mode)
+        {
+            AnsiConsole.MarkupLine("[red]Transaction not started[/]: {0}", Markup.Escape(mode.Message));
+            AnsiConsole.WriteLine();
+            return;
+        }
+
         string errorCode = ex is CamusException ce ? ce.Code : $"0x{ex.HResult:X8}";
 
         AnsiConsole.MarkupLine("[red]{0}[/] ([grey]{1}[/]): {2}", Markup.Escape(ex.GetType().Name), Markup.Escape(errorCode), Markup.Escape(ex.Message));
@@ -50,6 +70,11 @@ internal static class ErrorReporter
             // A retry at the same timestamp fails again, so the fix is a new transaction.
             case "CADB0847":
                 AnsiConsole.MarkupLine("[grey58]The snapshot of this read is older than the history the server still keeps, for example an AS OF SYSTEM TIME older than the retention age. Start a new transaction, or read as of a newer time.[/]");
+                break;
+
+            // A write, DDL or a sequence draw in a transaction that BEGIN READ ONLY opened.
+            case "CADB0849":
+                AnsiConsole.MarkupLine("[grey58]The transaction was read-only. To write, open the transaction with[/] [cyan]begin[/] [grey58]or[/] [cyan]begin read write[/][grey58].[/]");
                 break;
 
             // CADB0533 is the code of each feature that the server refuses. Some of its messages are

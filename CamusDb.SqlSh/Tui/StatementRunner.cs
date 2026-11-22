@@ -26,6 +26,11 @@ internal sealed class StatementRunner
     private readonly CatalogPane _catalog;
     private readonly SqlCompletion? _completion;
 
+    // True when a schema statement ran in the open transaction. With the server setting
+    // transactional_ddl_enabled on, the catalog does not see the change until COMMIT, so the catalog
+    // and the completion load again when the transaction ends (mirrors ShellSession).
+    private bool _transactionChangedSchema;
+
     private CancellationTokenSource? _cancel;
 
     public StatementRunner(TuiSession session, TuiContext context, CatalogPane catalog, SqlCompletion? completion)
@@ -114,6 +119,14 @@ internal sealed class StatementRunner
                     results.AddMessage(sql, entry, error);
             }
         }
+        // ESC or Ctrl+C stopped the statement. The client reports that with an exception, but it is not
+        // an error of the statement. A write outside a transaction can still commit when the cancel
+        // arrives late, and an open transaction stays open, as after a failed statement.
+        catch (Exception) when (token.IsCancellationRequested)
+        {
+            log.Add("cancelled");
+            results.AddMessage(current, "cancelled", false);
+        }
         catch (Exception ex)
         {
             log.Fail(ex.Message);
@@ -196,7 +209,7 @@ internal sealed class StatementRunner
         else if (IsServerLevelDDL(sql))
         {
             await using CamusConnection sys = await _session.OpenEndpointAsync();
-            await DdlAsync(sys, sql, transaction: null);
+            await DdlAsync(sys, sql, transaction: null, token);
             log.Add($"OK ({stopwatch.Elapsed})");
 
             // CREATE, DROP and RENAME DATABASE change the database list in the catalog.
@@ -204,11 +217,15 @@ internal sealed class StatementRunner
                 await _catalog.LoadAsync();
         }
         // DDL in the database goes in the open transaction, so the server decides whether it can run
-        // there. TRUNCATE cannot, and fails with CADB0538 (mirrors ShellSession).
+        // there. TRUNCATE cannot, and fails with CADB0538. With transactional_ddl_enabled on, COMMIT and
+        // ROLLBACK also apply to CREATE, ALTER and DROP (mirrors ShellSession).
         else if (IsDDL(sql))
         {
-            await DdlAsync(connection, sql, _session.Transaction);
+            await DdlAsync(connection, sql, _session.Transaction, token);
             log.Add($"OK ({stopwatch.Elapsed})");
+
+            if (_session.Transaction is not null)
+                _transactionChangedSchema = true;
 
             // A CREATE or DROP changes what the catalog should show.
             if (ChangesTableSet(sql))
@@ -225,8 +242,14 @@ internal sealed class StatementRunner
             if (_session.Transaction is not null)
                 throw new InvalidOperationException("There's an active transaction already");
 
-            _session.Transaction = await connection.BeginTransactionAsync();
-            log.Add($"transaction started ({stopwatch.Elapsed})");
+            // BEGIN READ ONLY and the other modes (mirrors ShellSession).
+            CamusTransactionOptions options = BeginStatement.Parse(sql);
+
+            _session.Transaction = await connection.BeginTransactionAsync(options);
+            _transactionChangedSchema = false;
+
+            string? modes = BeginStatement.DescribeModes(options);
+            log.Add(modes is null ? $"transaction started ({stopwatch.Elapsed})" : $"transaction started, {modes} ({stopwatch.Elapsed})");
         }
         else if (IsCommitTx(sql))
         {
@@ -236,11 +259,14 @@ internal sealed class StatementRunner
             try
             {
                 await transaction.CommitAsync();
-                log.Add($"committed ({stopwatch.Elapsed})");
+
+                string? timestamp = transaction.CommitTimestamp?.ToString();
+                log.Add(timestamp is null ? $"committed ({stopwatch.Elapsed})" : $"committed at {timestamp} ({stopwatch.Elapsed})");
             }
             finally
             {
                 _session.Transaction = null;
+                await OnTransactionEndedAsync();
             }
         }
         else if (IsRollbackTx(sql))
@@ -256,6 +282,7 @@ internal sealed class StatementRunner
             finally
             {
                 _session.Transaction = null;
+                await OnTransactionEndedAsync();
             }
         }
         else if (IsReturningWrite(sql))
@@ -268,18 +295,46 @@ internal sealed class StatementRunner
             cmd.CommandTimeout = 60;
             cmd.Transaction = _session.Transaction;
 
-            int affected = await cmd.ExecuteNonQueryAsync();
+            int affected = await cmd.ExecuteNonQueryAsync(token);
             log.Add($"{affected} rows affected ({stopwatch.Elapsed})");
         }
     }
 
-    private static async Task DdlAsync(CamusConnection connection, string sql, CamusTransaction? transaction)
+    // Loads the catalog and the completion again when the transaction that ended ran a schema
+    // statement. A failed load keeps the old names, because the statement itself completed.
+    private async Task OnTransactionEndedAsync()
+    {
+        if (!_transactionChangedSchema)
+            return;
+
+        _transactionChangedSchema = false;
+
+        if (!_session.HasDatabase)
+            return;
+
+        try
+        {
+            await _catalog.RefreshAsync();
+
+            if (_completion is not null)
+            {
+                await _completion.RefreshInlineFunctionsAsync(_session.Connection);
+                await _completion.RefreshTriggersAsync(_session.Connection);
+            }
+        }
+        catch (Exception)
+        {
+            // The catalog and the completion keep the names they had.
+        }
+    }
+
+    private static async Task DdlAsync(CamusConnection connection, string sql, CamusTransaction? transaction, CancellationToken token)
     {
         using CamusCommand cmd = connection.CreateCamusCommand(sql);
         cmd.CommandTimeout = 60;
         cmd.Transaction = transaction;
 
-        await cmd.ExecuteDDLAsync();
+        await cmd.ExecuteDDLAsync(token);
     }
 
     // Reads the first page and leaves the reader open, so scrolling can pull the rest.
@@ -293,7 +348,21 @@ internal sealed class StatementRunner
         cmd.CommandTimeout = 60;
         cmd.Transaction = _session.Transaction;
 
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        // The client reads every row before ExecuteReaderAsync returns, so without the token ESC and
+        // Ctrl+C had no effect until the server sent the whole result. The grid owns the command only
+        // after StartGrid, so a failure before that disposes it here.
+        CamusDataReader reader;
+
+        try
+        {
+            reader = await cmd.ExecuteReaderAsync(token);
+        }
+        catch
+        {
+            await cmd.DisposeAsync();
+            throw;
+        }
+
         TimeSpan first = stopwatch.Elapsed;
 
         results.StartGrid(cmd, reader);
@@ -318,7 +387,7 @@ internal sealed class StatementRunner
         cmd.CommandTimeout = 60;
         cmd.Transaction = _session.Transaction;
 
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        CamusDataReader reader = await cmd.ExecuteReaderAsync(token);
         int affected = reader.RecordsAffected;
 
         if (reader.FieldCount == 0)

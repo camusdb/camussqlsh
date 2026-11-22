@@ -50,7 +50,7 @@ internal static class ExportCommand
             string extension = format == OutputFormat.Yaml ? "yaml" : formatName.ToLowerInvariant();
             string suggestion = SuggestExportFileName(query, extension, DateTime.Now);
 
-            path = fromPrompt ? await AskExportPath(session.LineEditor is not null, suggestion) : suggestion;
+            path = fromPrompt ? await AskExportPath(session.Keys, suggestion) : suggestion;
 
             if (path is null)
             {
@@ -69,6 +69,18 @@ internal static class ExportCommand
             ? await session.OpenEndpointConnectionAsync()
             : session.Connection;
 
+        // At the prompt, ESC and Ctrl+C cancel the query. A cancel comes before the temporary file.
+        await session.RunCancellableAsync(token => WriteExportAsync(session, queryConnection, query, format, fullPath, token), fromPrompt, write: false);
+    }
+
+    private static async Task WriteExportAsync(
+        ShellSession session,
+        CamusConnection queryConnection,
+        string query,
+        OutputFormat format,
+        string fullPath,
+        CancellationToken token)
+    {
         await using CamusCommand cmd = queryConnection.CreateSelectCommand(query);
 
         cmd.CommandTimeout = 60;
@@ -76,7 +88,9 @@ internal static class ExportCommand
 
         Stopwatch stopwatch = Stopwatch.StartNew();
 
-        CamusDataReader reader = await cmd.ExecuteReaderAsync();
+        // The client reads every row before ExecuteReaderAsync returns, so the token covers all the
+        // work on the server.
+        await using CamusDataReader reader = await cmd.ExecuteReaderAsync(token);
 
         string tempPath = fullPath + ".tmp";
         int rows;
@@ -99,18 +113,19 @@ internal static class ExportCommand
 
     // Asks where an export goes, with the suggested name already typed in: Enter takes it, and any edit
     // changes it. Returns null when the user empties the line or cancels with Ctrl+C. Without the rich
-    // editor, the name cannot be typed in, so the plain prompt shows it as the default instead.
-    private static async Task<string?> AskExportPath(bool richEditor, string suggestion)
+    // editor (no `keys`), the name cannot be typed in, so the plain prompt shows it as the default
+    // instead. The question reads the keys of the prompt, so it gets the keys typed ahead first.
+    private static async Task<string?> AskExportPath(PromptKeys? keys, string suggestion)
     {
         string? answer;
 
-        if (!richEditor)
+        if (keys is null)
         {
             answer = AnsiConsole.Prompt(new TextPrompt<string>("Export to:").DefaultValue(suggestion));
         }
         else
         {
-            LineEditor pathEditor = new()
+            LineEditor pathEditor = new(source: keys)
             {
                 Text = suggestion,
                 Prompt = new LineEditorPrompt("[grey58]Export to:[/]")

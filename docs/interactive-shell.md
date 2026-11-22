@@ -90,6 +90,14 @@ reads, use the `SHOW` statements. See
 
 `\d` does not show the foreign keys of other tables that point to a table.
 
+An expression index shows its key as the server writes it, with each column name in backticks:
+
+```text
+Indexes:
+    "users_lower_email" UNIQUE ((lower(`email`)))
+    "users_mixed" (`score` DESC, (jsonb_object_field_text(`doc`, 'email')))
+```
+
 ## Inline functions and triggers
 
 An inline function is a SQL scalar function with a C# body in the statement. An inline trigger is
@@ -173,6 +181,49 @@ The shell tracks the transaction that `begin` (or `start transaction`) opens:
 - The exit commands do not work while a transaction is open. Run `commit` or `rollback` first.
 - If a statement in the transaction fails, the shell rolls back the transaction and forgets it. If
   `commit` or `rollback` fails, the shell forgets the transaction.
+- After `commit`, the shell shows the commit timestamp of the transaction, for example
+  `Commit timestamp: HLC(1:1763820000000:0)`. The timestamp puts the commit in its order among the
+  other commits of the cluster. A transaction that wrote nothing has no commit timestamp. A server
+  older than CamusDB 0.18.4 does not send it.
+
+`begin` and `start transaction` take the PostgreSQL transaction modes:
+
+```sql
+begin read only;
+begin isolation level read committed;
+start transaction isolation level serializable, read only;
+```
+
+| Mode | Result |
+| --- | --- |
+| `read only` | The server refuses each write, schema statement and `nextval()` in the transaction with `CADB0849`. |
+| `read write` | The transaction can read and write. This is the default. |
+| `isolation level serializable` | The strongest level. With `read only`, the transaction reads one snapshot and takes no locks. |
+| `isolation level read committed` | Each read sees the latest committed data. |
+
+A mode that the statement does not name comes from the connection, for example from `--isolation`.
+The comma between two modes is optional. The shell does not open a transaction for a mode that
+CamusDB does not have, such as `repeatable read` or `deferrable`. After `begin`, the shell shows the
+modes that the statement named.
+
+### Schema statements in a transaction
+
+The server setting `transactional_ddl_enabled` (off by default) decides what a schema statement does
+in a transaction:
+
+- With the setting off, `CREATE`, `ALTER` and `DROP` commit at once. A later `rollback` does not undo
+  them.
+- With the setting on, `commit` makes the rows and the schema change visible together, and
+  `rollback` undoes both. Other sessions do not see the change before `commit`. The server refuses
+  with `CADB0538` each schema statement that it cannot run in a transaction yet, for example a
+  foreign key, `SET NOT NULL` or a sequence statement. One transaction with schema changes can run
+  at a time in each database. A transaction that waits more than 30 seconds for its turn fails with
+  `CADB0504`.
+
+The completion loads the names of the relations, functions and triggers outside the transaction. Thus,
+with the setting on, a table that the transaction creates is not in the completion before `commit`.
+After `commit` or `rollback` of a transaction with a schema statement, the shell loads the names
+again.
 
 See [Transactions](https://camusdb.github.io/docs/sql-transactions/) for the server side.
 
@@ -216,6 +267,26 @@ Semicolons separate statements. A semicolon in a quoted string or in a `$$` func
 | `Home` / `End` | Go to the start or end of the line. |
 | `PageUp` / `PageDown` | Go to the first or last line. |
 | `Tab` / `Ctrl+Tab` | Go to the next or previous completion. |
+| `Esc` | While a statement runs, cancel it. |
+| `Ctrl+C` | While a statement runs, cancel it. At the prompt, clear the line. On an empty line, exit. |
+
+## Cancel a statement
+
+Press `Esc` or `Ctrl+C` while a statement runs. The shell stops the statement and shows
+`Cancelled with ESC` or `Cancelled with Ctrl+C`, then a new prompt.
+
+- You can cancel a query, a write, DDL and `\export`.
+- You cannot cancel `BEGIN`, `COMMIT` or `ROLLBACK`. If a `COMMIT` stops halfway, the shell cannot
+  know whether the transaction committed.
+- In a transaction, a cancel rolls back the whole transaction, the same as a failed statement.
+- Outside a transaction, the server commits each write by itself. If the server finished the write
+  before the cancel arrived, the change stays. The shell shows a note after a cancelled write.
+- Text that you type while the statement runs stays. It appears at the next prompt.
+- Over REST, the server also stops the statement. Over gRPC, the default transport, the shell stops
+  at once, but the server finishes the statement. The client does not tell the server about the
+  cancel yet.
+
+In a script (`-f`) or with `-e`, `Ctrl+C` ends the shell, and it rolls back an open transaction.
 
 ## Syntax coloring
 

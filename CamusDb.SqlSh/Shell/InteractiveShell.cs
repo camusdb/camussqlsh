@@ -36,6 +36,8 @@ internal sealed class InteractiveShell
     {
         // Deliver Ctrl+C to the line editor as input instead of killing the process, so the editor can
         // clear a non-empty prompt on the first press and only exit when the prompt is already empty.
+        // While a statement runs, a CancelWatch reads the keys, so Ctrl+C (and ESC) cancels the
+        // statement and does not reach the next prompt.
         if (session.LineEditor is not null)
         {
             Console.TreatControlCAsInput = true;

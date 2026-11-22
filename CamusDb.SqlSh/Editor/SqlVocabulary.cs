@@ -270,6 +270,9 @@ internal static class SqlVocabulary
         "ranges",
         "range",
         "row",
+        // SHOW PARTITIONS: the Raft partitions as the node that answers sees them. PARTITIONS is a plain
+        // identifier to the parser and stays usable as a table, column or alias name.
+        "partitions",
         // SHOW SLOW QUERIES [LIKE '<pattern>']: the node's record of statements that ran over the
         // configured threshold. Both words are plain identifiers to the parser and stay usable as
         // names; the editor colors them because they read as part of the SHOW vocabulary.
