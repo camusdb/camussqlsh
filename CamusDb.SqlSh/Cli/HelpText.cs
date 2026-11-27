@@ -165,6 +165,12 @@ internal static class HelpText
         AnsiConsole.MarkupLine("                                node with [cyan]cluster[/], holds open now");
         AnsiConsole.MarkupLine("  [cyan]cancel query[/] '<query_id>'     Stop a running read on any node. A write or a");
         AnsiConsole.MarkupLine("                                schema change cannot be stopped");
+        AnsiConsole.MarkupLine("  [cyan]show[/] [[[cyan]cluster[/]]] [cyan]transactions[/]");
+        AnsiConsole.MarkupLine("                                The open transactions of [white]this node[/], or of every");
+        AnsiConsole.MarkupLine("                                node with [cyan]cluster[/], idle ones included. Eighteen");
+        AnsiConsole.MarkupLine("                                columns, so append [cyan]\\G[/] for vertical output");
+        AnsiConsole.MarkupLine("  [cyan]kill transaction[/] '<id>'      Roll back an open transaction on any node, so the");
+        AnsiConsole.MarkupLine("                                work it blocks can proceed");
         AnsiConsole.WriteLine();
     }
 }

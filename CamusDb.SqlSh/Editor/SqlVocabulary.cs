@@ -284,6 +284,11 @@ internal static class SqlVocabulary
         "connections",
         "cancel",
         "query",
+        // SHOW [CLUSTER] TRANSACTIONS and KILL TRANSACTION '<transaction_id>': the open explicit
+        // transactions a node holds, idle ones included, and the rollback of one. Neither word is
+        // reserved.
+        "transactions",
+        "kill",
         // SET/RESET CLUSTER SETTING and SHOW CLUSTER SETTINGS. Both spellings of the last word are
         // listed because the statements differ: SETTING for the mutations, SETTINGS for the listing.
         "cluster",
