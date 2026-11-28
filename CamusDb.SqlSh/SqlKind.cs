@@ -514,6 +514,11 @@ internal static class SqlKind
                StartsWithWords(trimmedSql, "show", "cluster", "queries") ||
                StartsWithWords(trimmedSql, "show", "connections") ||
                StartsWithWords(trimmedSql, "show", "cluster", "connections") ||
+               // The open explicit transactions of this node, or of every node. They read the host's
+               // transaction list, not a database, so they run on the endpoint connection, outside the
+               // shell's own open transaction. TRANSACTIONS is a plain identifier to the parser.
+               StartsWithWords(trimmedSql, "show", "transactions") ||
+               StartsWithWords(trimmedSql, "show", "cluster", "transactions") ||
                // The cluster-wide settings overlay: like SHOW VARIABLES it is read from no database, so
                // it runs on the endpoint connection and answers in a session that never ran `use`.
                StartsWithWords(trimmedSql, "show", "cluster", "settings") ||
@@ -555,10 +560,20 @@ internal static class SqlKind
     }
 
     // Everything the server dispatches before opening a database — database lifecycle DDL, user and
-    // grant administration, runtime cluster settings, plus CANCEL QUERY.
+    // grant administration, runtime cluster settings, plus CANCEL QUERY and KILL TRANSACTION.
     internal static bool IsServerLevelDDL(string sql)
     {
-        return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql) || IsCancelQuery(sql);
+        return IsDatabaseDDL(sql) || IsUserAdmin(sql) || IsClusterSettingsAdmin(sql) || IsCancelQuery(sql) ||
+               IsKillTransaction(sql);
+    }
+
+    // KILL TRANSACTION '<transaction_id>' rolls back an open transaction on this node, or forwards the
+    // kill to the node the id names. Like CANCEL QUERY it names no database, opens no transaction and
+    // returns no rows, so it runs on a database-less connection, outside the shell's open transaction.
+    // KILL is a plain identifier to the parser, so the prefix is matched by words.
+    internal static bool IsKillTransaction(string sql)
+    {
+        return StartsWithWords(sql, "kill", "transaction");
     }
 
     // CANCEL QUERY '<query_id>' stops a statement on this node's running-statement list, or forwards
